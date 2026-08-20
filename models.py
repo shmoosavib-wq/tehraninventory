@@ -8,6 +8,7 @@ class Product(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
+    ai_description = Column(Text, nullable=True)
     price_usd = Column(Float, nullable=False)
     size = Column(String, nullable=True)
     weight_grams = Column(Float, nullable=True)

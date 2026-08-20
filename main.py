@@ -1,11 +1,21 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import inspect, text
 from typing import List
 import models, schemas
 from database import engine, get_db
 
-# Create tables
-models.Base.metadata.create_all(bind=engine)
+def ensure_schema():
+    models.Base.metadata.create_all(bind=engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("products")}
+    if "ai_description" not in columns:
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE products ADD COLUMN ai_description TEXT")
+            )
+
+
+ensure_schema()
 
 app = FastAPI(title="Tehran Inventory API", version="1.0.0")
 

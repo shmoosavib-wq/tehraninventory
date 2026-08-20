@@ -6,6 +6,7 @@ from typing import Optional
 class ProductCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    ai_description: Optional[str] = None
     price_usd: float
     size: Optional[str] = None
     weight_grams: Optional[float] = None
@@ -19,6 +20,7 @@ class ProductCreate(BaseModel):
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    ai_description: Optional[str] = None
     price_usd: Optional[float] = None
     size: Optional[str] = None
     weight_grams: Optional[float] = None
@@ -34,6 +36,7 @@ class ProductResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
+    ai_description: Optional[str]
     price_usd: float
     size: Optional[str]
     weight_grams: Optional[float]

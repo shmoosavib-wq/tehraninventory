@@ -7,6 +7,7 @@ Tehran Inventory Bot
 
 import os
 import logging
+import re
 from typing import Optional
 
 import httpx
@@ -33,6 +34,12 @@ load_dotenv()
 
 # ── Configuration ─────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.environ.get(
+    "OPENAI_BASE_URL", "https://api.gapgpt.app/v1"
+).rstrip("/")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "glm-4-flash")
+AI_PROMPT_VERSION = "v2"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Add it to .env or the environment.")
@@ -86,6 +93,68 @@ def main_menu(user_id: int) -> ReplyKeyboardMarkup:
         rows.append([BTN_SETTINGS])
         rows.append([BTN_PRICE_VIEW])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def normalize_search_text(value: str) -> str:
+    value = (value or "").lower()
+    value = value.replace("ي", "ی").replace("ى", "ی").replace("ك", "ک")
+    value = value.replace("ۀ", "ه").replace("ة", "ه").replace("ؤ", "و")
+    value = value.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    value = re.sub(r"[\u064B-\u065F\u0670]", "", value)
+    value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def normalize_search_text_v2(value: str) -> str:
+    value = (value or "").lower()
+    for source, target in (
+        ("\u064a", "\u06cc"), ("\u0649", "\u06cc"), ("\u0643", "\u06a9"),
+        ("\u0629", "\u0647"), ("\u0624", "\u0648"), ("\u0623", "\u0627"),
+        ("\u0625", "\u0627"), ("\u0622", "\u0627"),
+    ):
+        value = value.replace(source, target)
+    value = re.sub(r"[\u064b-\u065f\u0670]", "", value)
+    value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def normalize_query_for_search(value: str) -> str:
+    value = normalize_search_text_v2(value)
+    replacements = {
+        "دخترانه": "بچگانه",
+        "دختر": "بچگانه",
+        "قرص": "دارو",
+        "مسکن": "درد",
+        "ضددرد": "درد",
+        "ضد درد": "درد",
+    }
+    for source, target in replacements.items():
+        value = value.replace(source, target)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def product_size(product: dict) -> str:
+    explicit = str(product.get("size") or "").strip()
+    if explicit:
+        return explicit
+    description = product.get("description") or ""
+    match = re.search(
+        r"(?:سایز|سایس|اندازه|size)\s*[:：\-]?\s*([0-9۰-۹]+(?:\s*[-/]\s*[0-9۰-۹]+)?)",
+        description,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else "-"
+
+
+def extract_price_max(query: str) -> float | None:
+    normalized = normalize_query_for_search(query).replace(",", ".")
+    match = re.search(
+        r"(?:زیر|کمتر\s+از|حداکثر|تا|زیر\s+قیمت)\s*(\d+(?:\.\d+)?)\s*(?:دلار|دالر|\$)?",
+        normalized,
+    )
+    if not match:
+        match = re.search(r"<\s*(\d+(?:\.\d+)?)", normalized)
+    return float(match.group(1)) if match else None
 
 # ── Helpers ───────────────────────────────────────────────────
 def is_admin(user_id: int) -> bool:
@@ -167,6 +236,51 @@ async def call_api(
             raise ValueError(f"Unknown method {method}")
         resp.raise_for_status()
         return resp.json()
+
+
+async def generate_ai_description(product: dict) -> str:
+    """Generate a short Persian sales description with one inexpensive API call."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    prompt = (
+        "برای محصول زیر یک راهنمای خرید دقیق و جذاب به زبان فارسی بنویس. "
+        "فقط بر اساس اطلاعات داده‌شده بنویس و هیچ ویژگی، امتیاز، review یا قیمت روزی را حدس نزن. "
+        "اگر اطلاعاتی موجود نیست، صریحاً بنویس «اطلاعاتی ثبت نشده است». "
+        "پاسخ را با این تیترها و حداکثر ۱۸۰ کلمه بنویس: معرفی، کاربردهای احتمالی، نکات مهم، جمع‌بندی.\n\n"
+        f"نام: {product.get('name') or '-'}\n"
+        f"دسته: {product.get('category') or '-'}\n"
+        f"قیمت خرید دلاری: {product.get('price_usd') or '-'}\n"
+        f"سایز: {product.get('size') or '-'}\n"
+        f"وزن (گرم): {product.get('weight_grams') or '-'}\n"
+        f"موقعیت: {product.get('location') or '-'}\n"
+        f"توضیحات موجود: {product.get('description') or '-'}"
+    )
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENAI_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "تو یک نویسنده متن فروشگاهی دقیق و فارسی‌زبان هستی.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.5,
+                "max_tokens": 220,
+            },
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not content or not content.strip():
+            raise RuntimeError("AI returned an empty response")
+        return content.strip()
 
 
 async def download_photo(update: Update, filename: str) -> str | None:
@@ -526,12 +640,39 @@ async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     keyword = update.message.text.strip()
     products = await call_api("GET", "/products")
-    kw = keyword.lower()
+    query_normalized = normalize_query_for_search(keyword)
+    query_tokens = [token for token in query_normalized.split() if len(token) > 1]
+    max_price = extract_price_max(keyword)
+    male_shoe_query = "مردانه" in query_normalized and "کفش" in query_normalized
+    ranked = []
+    for product in products:
+        if max_price is not None and float(product.get("price_usd") or 0) > max_price:
+            continue
+        searchable = normalize_search_text_v2(" ".join(
+            str(product.get(field) or "")
+            for field in ("name", "description", "category", "location", "size")
+        ))
+        female_shoe_query = (
+            any(term in query_normalized for term in ("بچگانه", "زنانه"))
+            and "کفش" in query_normalized
+        )
+        if female_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
+            if not any(term in searchable for term in ("دخترانه", "زنانه", "بچگانه")):
+                continue
+        token_hits = sum(token in searchable for token in query_tokens)
+        if male_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
+            if "زنانه" not in searchable and "بچگانه" not in searchable:
+                token_hits += 2
+        if query_normalized in searchable or (
+            query_tokens and token_hits >= len(query_tokens)
+        ):
+            ranked.append((2, token_hits, product))
+        elif token_hits and len(query_tokens) == 1:
+            ranked.append((1, token_hits, product))
     results = [
-        p for p in products
-        if kw in p.get("name", "").lower()
-        or kw in p.get("description", "").lower()
-        or kw in p.get("category", "").lower()
+        product for _, _, product in sorted(
+            ranked, key=lambda item: (item[0], item[1]), reverse=True
+        )
     ]
     if not results:
         await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
@@ -544,6 +685,91 @@ async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f" | 📍 {product.get('location', '-')} | ID: {product['id']}\n\n"
             )
         await update.message.reply_text(text)
+    await update.message.reply_text(
+        "از منوی زیر انتخاب کنید:", reply_markup=main_menu(update.effective_user.id)
+    )
+
+
+async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.pop("awaiting_search", False):
+        return
+    keyword = update.message.text.strip()
+    products = await call_api("GET", "/products")
+    query_normalized = normalize_query_for_search(keyword)
+    query_tokens = [token for token in query_normalized.split() if len(token) > 1]
+    max_price = extract_price_max(keyword)
+    male_shoe_query = "مردانه" in query_normalized and "کفش" in query_normalized
+    ranked = []
+    for product in products:
+        if max_price is not None and float(product.get("price_usd") or 0) > max_price:
+            continue
+        searchable = normalize_search_text_v2(" ".join(
+            str(product.get(field) or "")
+            for field in ("name", "description", "category", "location", "size")
+        ))
+        female_shoe_query = (
+            any(term in query_normalized for term in ("بچگانه", "زنانه"))
+            and "کفش" in query_normalized
+        )
+        if female_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
+            if not any(term in searchable for term in ("دخترانه", "زنانه", "بچگانه")):
+                continue
+        token_hits = sum(token in searchable for token in query_tokens)
+        if male_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
+            if "زنانه" not in searchable and "بچگانه" not in searchable:
+                token_hits += 2
+        if query_normalized in searchable or (
+            query_tokens and token_hits >= len(query_tokens)
+        ):
+            ranked.append((2, token_hits, product))
+        elif token_hits and len(query_tokens) == 1:
+            ranked.append((1, token_hits, product))
+    results = [
+        product for _, _, product in sorted(
+            ranked, key=lambda item: (item[0], item[1]), reverse=True
+        )
+    ]
+    if not results:
+        await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
+    else:
+        await update.message.reply_text(
+            f"🔍 نتایج جستجو برای «{keyword}» ({len(results)} مورد):"
+        )
+        for product in results[:10]:
+            final_price = calculate_toman(
+                product.get("price_usd", 0), product.get("weight_grams")
+            )
+            description = (product.get("description") or "توضیحی ثبت نشده است.").strip()
+            description = description[:217] + "..." if len(description) > 220 else description
+            caption = (
+                f"📏 سایز: {product_size(product)}\n"
+                f"📦 {product.get('name', '-')}\n"
+                f"💵 قیمت نهایی: {toman(final_price)}\n"
+                f"🏷️ دسته: {product.get('category') or '-'} | 📍 {product.get('location') or '-'}\n"
+                f"📝 {description}"
+            )
+            photo_name = next(
+                (p for p in (product.get("original_photo_path") or "").split("|") if p),
+                None,
+            )
+            full_photo = None
+            if photo_name:
+                full_photo = photo_name if os.path.isabs(photo_name) else os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), photo_name
+                )
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "مشاهده جزئیات و عکس‌ها",
+                    callback_data=f"product_detail:{product['id']}",
+                )
+            ]])
+            if full_photo and os.path.exists(full_photo):
+                with open(full_photo, "rb") as photo:
+                    await update.message.reply_photo(
+                        photo=photo, caption=caption, reply_markup=markup
+                    )
+            else:
+                await update.message.reply_text(caption, reply_markup=markup)
     await update.message.reply_text(
         "از منوی زیر انتخاب کنید:", reply_markup=main_menu(update.effective_user.id)
     )
@@ -857,7 +1083,7 @@ async def stage_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Command: /list (paginated, with photos) ──────────────────
-LIST_PAGE_SIZE = 5
+LIST_PAGE_SIZE = 12
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -874,6 +1100,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["list_products"] = products
     context.user_data["list_page"] = 0
+    context.user_data["list_title"] = "📦 فهرست محصولات"
     await _send_product_page(update, context, 0)
 
 
@@ -884,89 +1111,27 @@ async def _send_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     end = start + LIST_PAGE_SIZE
     page_items = products[start:end]
 
-    for idx, p in enumerate(page_items, start=start):
-        final_price = calculate_toman(
-            p.get("price_usd", 0),
-            p.get("weight_grams"),
-        )
-        text = (
-            f"📦 **{p['name']}**\n"
-            f"💰 ${p['price_usd']}  |  📏 {p.get('size', '-')}  |  🏷️ {p.get('category', '-')}\n"
-            f"📍 {p.get('location', '-')}  |  ID: {p['id']}\n"
-            f"💵 قیمت نهایی: {toman(final_price)}"
-        )
-        # Try to send photo
-        raw_paths = p.get("original_photo_path") or ""
-        photo_paths = [path for path in raw_paths.split("|") if path]
-        existing_paths = []
-        for photo_path in photo_paths:
-            if os.path.isabs(photo_path):
-                full = photo_path
-            else:
-                full = os.path.join(os.path.dirname(os.path.abspath(__file__)), photo_path)
-            if not os.path.exists(full):
-                continue
-            existing_paths.append(full)
-
-        sent_photo = False
-        controls = None
-        if is_admin(update.effective_user.id):
-            controls = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✏️ ویرایش", callback_data=f"edit_product:{p['id']}"),
-                    InlineKeyboardButton("📷 افزودن عکس", callback_data=f"photo_product:{p['id']}"),
-                ],
-                [InlineKeyboardButton("🗑 حذف", callback_data=f"delete_product:{p['id']}")],
-            ])
-        if existing_paths:
-            handles = []
-            try:
-                for full in existing_paths:
-                    handles.append(open(full, "rb"))
-                media = [
-                    InputMediaPhoto(
-                        media=handle,
-                        caption=text if index == 0 else None,
-                        parse_mode="Markdown" if index == 0 else None,
-                    )
-                    for index, handle in enumerate(handles)
-                ]
-                await update.effective_message.reply_media_group(media=media)
-                sent_photo = True
-                if controls:
-                    await update.effective_message.reply_text(
-                        "عملیات محصول را انتخاب کنید:",
-                        reply_markup=controls,
-                    )
-            except Exception as exc:
-                logger.warning("Could not send product album: %s", exc)
-            finally:
-                for handle in handles:
-                    handle.close()
-
-        if not sent_photo:
-            await update.effective_message.reply_text(
-                text,
-                parse_mode="Markdown",
-                reply_markup=controls,
-            )
-
-    # Navigation buttons
     buttons = []
+    for p in page_items:
+        photo_mark = "🖼" if p.get("original_photo_path") else "▫️"
+        label = f"{photo_mark} {p['name'][:35]} — ${p['price_usd']}"
+        buttons.append([
+            InlineKeyboardButton(label, callback_data=f"product_detail:{p['id']}")
+        ])
+
+    nav = []
     if page > 0:
-        buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"list_prev"))
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data="list_prev"))
     if end < total:
-        buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"list_next"))
-    if buttons:
-        kb = InlineKeyboardMarkup([buttons])
-        await update.effective_message.reply_text(
-            f"صفحه {page + 1} — محصول {start + 1}-{min(end, total)} از {total}",
-            reply_markup=kb,
-        )
-    else:
-        await update.effective_message.reply_text(
-            f"صفحه {page + 1} — محصول {start + 1}-{min(end, total)} از {total}"
-        )
+        nav.append(InlineKeyboardButton("➡️ بعدی", callback_data="list_next"))
+    if nav:
+        buttons.append(nav)
+    title = context.user_data.get("list_title", "📦 فهرست محصولات")
+    await update.effective_message.reply_text(
+        f"{title}\nمحصولات {start + 1}-{min(end, total)} از {total}\n"
+        "برای مشاهده جزئیات، یک محصول را انتخاب کنید.",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -981,7 +1146,105 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_product_page(update, context, page)
 
 
+async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    product_id = int(query.data.split(":", 1)[1])
+    product = await call_api("GET", f"/products/{product_id}")
+    final_price = calculate_toman(product.get("price_usd", 0), product.get("weight_grams"))
+    text = (
+        f"📦 {product['name']}\n"
+        f"💰 قیمت خرید: ${product['price_usd']}\n"
+        f"💵 قیمت نهایی: {toman(final_price)}\n"
+        f"📏 سایز: {product.get('size') or '-'}\n"
+        f"⚖️ وزن: {product.get('weight_grams') or '-'} گرم\n"
+        f"🏷️ دسته: {product.get('category') or '-'}\n"
+        f"📍 موقعیت: {product.get('location') or '-'}\n"
+        f"📝 توضیحات:\n{product.get('description') or 'ندارد'}"
+    )
+    raw_paths = product.get("original_photo_path") or ""
+    existing_paths = []
+    for photo_path in raw_paths.split("|"):
+        if not photo_path:
+            continue
+        full = photo_path if os.path.isabs(photo_path) else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), photo_path
+        )
+        if os.path.exists(full):
+            existing_paths.append(full)
+    if existing_paths:
+        handles = []
+        try:
+            handles = [open(path, "rb") for path in existing_paths]
+            media = [
+                InputMediaPhoto(
+                    media=handle,
+                    caption=text if index == 0 else None,
+                    parse_mode="Markdown" if index == 0 else None,
+                )
+                for index, handle in enumerate(handles)
+            ]
+            await query.message.reply_media_group(media=media)
+        finally:
+            for handle in handles:
+                handle.close()
+    else:
+        await query.message.reply_text(text)
+    await query.message.reply_text(
+        "گزینه‌های محصول:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "✨ اطلاعات بیشتر", callback_data=f"ai_info:{product_id}"
+            )
+        ]]),
+    )
+    if is_admin(query.from_user.id):
+        await query.message.reply_text(
+            "عملیات محصول:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✏️ ویرایش", callback_data=f"edit_product:{product_id}"),
+                    InlineKeyboardButton("📷 افزودن عکس", callback_data=f"photo_product:{product_id}"),
+                ],
+                [InlineKeyboardButton("🗑 حذف", callback_data=f"delete_product:{product_id}")],
+            ]),
+        )
+
+
 # ── Command: /delete <id> ────────────────────────────────────
+async def product_ai_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("این قابلیت فعلاً غیرفعال است.")
+    await query.message.reply_text(
+        "ℹ️ توضیحات هوشمند فعلاً غیرفعال شده تا اتصال جستجوی واقعی وب اضافه شود."
+    )
+    return
+    product_id = int(query.data.split(":", 1)[1])
+    try:
+        product = await call_api("GET", f"/products/{product_id}")
+        cached = (product.get("ai_description") or "").strip()
+        if cached.startswith(f"{AI_PROMPT_VERSION}:"):
+            description = cached.split(":", 1)[1].strip()
+            source_note = " (ذخیره‌شده)"
+        else:
+            description = await generate_ai_description(product)
+            await call_api(
+                "PUT",
+                f"/products/{product_id}",
+                {"ai_description": f"{AI_PROMPT_VERSION}: {description}"},
+            )
+            source_note = ""
+        await query.message.reply_text(
+            f"✨ اطلاعات بیشتر درباره «{product.get('name', '-')}»{source_note}:\n\n"
+            f"{description}"
+        )
+    except Exception as exc:
+        logger.error("Error generating AI product info: %s", exc)
+        await query.message.reply_text(
+            "⚠️ فعلاً امکان دریافت اطلاعات بیشتر وجود ندارد. لطفاً کمی بعد دوباره تلاش کنید."
+        )
+
+
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ این دستور فقط برای ادمین است.")
@@ -1034,14 +1297,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
         return
 
-    text = f"🔍 نتایج جستجو برای «{keyword}» ({len(results)} مورد):\n\n"
-    for i, p in enumerate(results[:10], 1):
-        text += (
-            f"{i}. {p['name']}\n"
-            f"   💰 ${p['price_usd']} | 🏷️ {p.get('category', '-')} | "
-            f"📍 {p.get('location', '-')} | ID: {p['id']}\n\n"
-        )
-    await update.message.reply_text(text)
+    context.user_data["list_products"] = results
+    context.user_data["list_page"] = 0
+    context.user_data["list_title"] = f"🔍 نتایج «{keyword}»"
+    await _send_product_page(update, context, 0)
 
 
 # ── Main ─────────────────────────────────────────────────────
@@ -1181,6 +1440,12 @@ def main():
         )
     )
     application.add_handler(
+        CallbackQueryHandler(product_detail_callback, pattern=r"^product_detail:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(product_ai_info_callback, pattern=r"^ai_info:\d+$")
+    )
+    application.add_handler(
             MessageHandler(
             filters.Regex(
                 f"^(?:{BTN_LIST}|{BTN_SEARCH}|{BTN_IMPORT}|{BTN_PRICE_VIEW})$"
@@ -1189,7 +1454,7 @@ def main():
         )
     )
     application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, receive_search_text)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, receive_search_cards)
     )
     application.add_handler(
         CallbackQueryHandler(list_callback, pattern="^list_(next|prev)$")
