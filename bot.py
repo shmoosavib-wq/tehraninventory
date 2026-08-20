@@ -15,6 +15,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
+    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
 from telegram.ext import (
@@ -62,10 +64,28 @@ logger = logging.getLogger(__name__)
     NAME, PRICE, SIZE, WEIGHT, CATEGORY,
     LOCATION, DESCRIPTION, PHOTO, CONFIRM,
     SET_USD_RATE, SET_SHIPPING, SET_MULTIPLIER,
-) = range(12)
+    EDIT_FIELD, EDIT_VALUE, ADD_PHOTOS,
+) = range(15)
 
 # Timeout per stage (seconds)
 STAGE_TIMEOUT = 300
+
+BTN_LIST = "📦 لیست محصولات"
+BTN_SEARCH = "🔍 جستجوی محصول"
+BTN_ADD = "➕ افزودن محصول"
+BTN_SETTINGS = "⚙️ تنظیم قیمت"
+BTN_PRICE_VIEW = "💰 قیمت فعلی"
+BTN_IMPORT = "📥 ورود اکسل"
+BTN_MANAGE = "🛠 مدیریت محصولات"
+
+
+def main_menu(user_id: int) -> ReplyKeyboardMarkup:
+    rows = [[BTN_LIST, BTN_SEARCH]]
+    if is_admin(user_id):
+        rows.append([BTN_ADD, BTN_IMPORT])
+        rows.append([BTN_SETTINGS])
+        rows.append([BTN_PRICE_VIEW])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 # ── Helpers ───────────────────────────────────────────────────
 def is_admin(user_id: int) -> bool:
@@ -167,33 +187,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"سلام {user.first_name}!\n\n"
         f"سطح دسترسی: {admin_status}\n\n"
-        "دستورات:\n"
-        "/list — مشاهده محصولات\n"
-        "/search <کلمه> — جستجوی محصول\n"
+        "یکی از گزینه‌های زیر را انتخاب کنید:"
     )
-    if is_admin(user.id):
-        text += "/add — افزودن محصول جدید\n"
-        text += "/delete <id> — حذف محصول\n"
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, reply_markup=main_menu(user.id))
 
 
 # ── Command: /help ───────────────────────────────────────────
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📖 راهنما:\n\n"
-        "/list — مشاهده لیست محصولات\n"
-        "/search <کلمه> — جستجوی محصول\n"
-    )
+    text = "📖 از دکمه‌های منو استفاده کنید."
     if is_admin(update.effective_user.id):
-        text += (
-            "/add — افزودن محصول جدید\n"
-            "/delete <id> — حذف محصول\n\n"
-            "/settings — تنظیم نرخ دلار، حمل و ضریب قیمت\n"
-            "/price_settings — نمایش تنظیمات قیمت\n\n"
-            "مراحل افزودن:\n"
-            "نام → قیمت → سایز → وزن → دسته → موقعیت → توضیح → عکس → تأیید\n"
-        )
-    await update.message.reply_text(text)
+        text += "\nبرای ثبت محصول: افزودن محصول\nبرای تنظیم قیمت: تنظیم قیمت"
+    await update.message.reply_text(
+        text, reply_markup=main_menu(update.effective_user.id)
+    )
 
 
 async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,7 +266,8 @@ async def settings_multiplier(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"نرخ دلار: {settings['usd_rate']:,.0f} تومان\n"
         f"حمل: {settings['shipping_per_kg']:,.0f} تومان/کیلوگرم\n"
         f"ضریب: {settings['multiplier']}\n\n"
-        "فرمول: (قیمت دلار × نرخ دلار × ضریب) + (وزن به کیلو × هزینه حمل)"
+        "فرمول: (قیمت دلار × نرخ دلار × ضریب) + (وزن به کیلو × هزینه حمل)",
+        reply_markup=main_menu(update.effective_user.id),
     )
     return ConversationHandler.END
 
@@ -276,6 +283,269 @@ async def cmd_price_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"حمل: {settings['shipping_per_kg']:,.0f} تومان/کیلوگرم\n"
         f"ضریب: {settings['multiplier']}\n\n"
         "برای تغییر: /settings"
+    )
+
+
+async def import_excel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ این گزینه فقط برای ادمین است.")
+        return
+    context.user_data["awaiting_excel"] = True
+    await update.message.reply_text(
+        "📥 فایل Excel با پسوند xlsx را ارسال کنید.\n"
+        "قیمت نهایی از تنظیمات بات محاسبه می‌شود و از Excel خوانده نمی‌شود."
+    )
+
+
+def _excel_value(row: dict, *keys):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+async def import_excel_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.pop("awaiting_excel", False):
+        return
+    document = update.message.document
+    if not document or not document.file_name.lower().endswith(".xlsx"):
+        await update.message.reply_text("❌ فقط فایل Excel با پسوند xlsx قابل قبول است.")
+        return
+
+    temp_path = os.path.join(PHOTOS_DIR, f"__import_{document.file_unique_id}.xlsx")
+    try:
+        file = await document.get_file()
+        await file.download_to_drive(temp_path)
+        from openpyxl import load_workbook
+        workbook = load_workbook(temp_path, read_only=True, data_only=True)
+        sheet = workbook["محصولات"] if "محصولات" in workbook.sheetnames else workbook.worksheets[0]
+        rows = sheet.iter_rows(min_row=5, values_only=True)
+        headers = [cell.value for cell in sheet[4]]
+        imported = 0
+        skipped = 0
+        for values in rows:
+            row = {str(headers[index]).strip(): value for index, value in enumerate(values) if index < len(headers)}
+            name = _excel_value(row, "نام محصول", "نام")
+            price = _excel_value(row, "قیمت خرید (دلار)", "قیمت دلار", "قیمت")
+            if not name or price in (None, ""):
+                if any(value not in (None, "") for value in values):
+                    skipped += 1
+                continue
+            try:
+                payload = {
+                    "name": str(name).strip(),
+                    "price_usd": float(price),
+                }
+                field_map = {
+                    "توضیحات دستی": "description",
+                    "سایز": "size",
+                    "وزن (گرم)": "weight_grams",
+                    "موقعیت": "location",
+                    "دسته‌بندی": "category",
+                    "لینک تلگرام ۱": "telegram_link_1",
+                    "لینک تلگرام ۲": "telegram_link_2",
+                }
+                for source, target in field_map.items():
+                    value = row.get(source)
+                    if value not in (None, ""):
+                        payload[target] = float(value) if target == "weight_grams" else str(value).strip()
+                await call_api("POST", "/products", data=payload)
+                imported += 1
+            except (TypeError, ValueError, httpx.HTTPError):
+                skipped += 1
+        workbook.close()
+        await update.message.reply_text(
+            f"✅ ورود Excel تمام شد.\nمحصول ثبت‌شده: {imported}\nردیف ردشده: {skipped}\n\n"
+            "حالا از «🛠 مدیریت محصولات» برای ویرایش یا افزودن عکس استفاده کنید.",
+            reply_markup=main_menu(update.effective_user.id),
+        )
+    except Exception as exc:
+        logger.exception("Excel import failed: %s", exc)
+        await update.message.reply_text("❌ خواندن فایل Excel ناموفق بود.")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+async def manage_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ این گزینه فقط برای ادمین است.")
+        return
+    try:
+        products = await call_api("GET", "/products")
+    except Exception:
+        await update.message.reply_text("❌ دریافت محصولات ناموفق بود.")
+        return
+    if not products:
+        await update.message.reply_text("📭 محصولی وجود ندارد.")
+        return
+    for product in products:
+        buttons = [
+            [
+                InlineKeyboardButton("✏️ ویرایش", callback_data=f"edit_product:{product['id']}"),
+                InlineKeyboardButton("📷 افزودن عکس", callback_data=f"photo_product:{product['id']}"),
+            ],
+            [InlineKeyboardButton("🗑 حذف", callback_data=f"delete_product:{product['id']}")],
+        ]
+        await update.message.reply_text(
+            f"📦 {product['name']}\nID: {product['id']} | ${product['price_usd']}",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+
+async def manage_product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.message.reply_text("⛔ فقط ادمین دسترسی دارد.")
+        return
+    action, product_id_text = query.data.split(":", 1)
+    product_id = int(product_id_text)
+    if action == "delete_product":
+        await call_api("DELETE", f"/products/{product_id}")
+        await query.message.reply_text("✅ محصول حذف شد.")
+        return
+    if action == "edit_product":
+        context.user_data["editing_product_id"] = product_id
+        await query.message.reply_text(
+            "فیلدی که می‌خواهید تغییر کند را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("نام", callback_data="edit_field:name"),
+                 InlineKeyboardButton("قیمت دلار", callback_data="edit_field:price_usd")],
+                [InlineKeyboardButton("سایز", callback_data="edit_field:size"),
+                 InlineKeyboardButton("وزن", callback_data="edit_field:weight_grams")],
+                [InlineKeyboardButton("دسته", callback_data="edit_field:category"),
+                 InlineKeyboardButton("موقعیت", callback_data="edit_field:location")],
+                [InlineKeyboardButton("توضیحات", callback_data="edit_field:description")],
+            ]),
+        )
+        return EDIT_FIELD
+    elif action == "photo_product":
+        context.user_data["photo_product_id"] = product_id
+        context.user_data["photo_paths"] = []
+        await query.message.reply_text(
+            "📷 عکس‌های محصول را یکی‌یکی بفرستید، سپس «اتمام عکس‌ها» را بزنید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ اتمام عکس‌ها", callback_data="finish_manage_photos")],
+                [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+            ]),
+        )
+        return ADD_PHOTOS
+
+
+async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    field = query.data.split(":", 1)[1]
+    context.user_data["editing_field"] = field
+    labels = {
+        "name": "نام جدید",
+        "price_usd": "قیمت جدید به دلار",
+        "size": "سایز جدید",
+        "weight_grams": "وزن جدید به گرم",
+        "category": "دسته‌بندی جدید",
+        "location": "موقعیت جدید",
+        "description": "توضیحات جدید",
+    }
+    await query.message.reply_text(f"{labels[field]} را ارسال کنید:")
+    return EDIT_VALUE
+
+
+async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    product_id = context.user_data.get("editing_product_id")
+    field = context.user_data.get("editing_field")
+    value = update.message.text.strip()
+    try:
+        if field in ("price_usd", "weight_grams"):
+            value = float(value.replace(",", ""))
+        await call_api("PUT", f"/products/{product_id}", data={field: value})
+        await update.message.reply_text(
+            "✅ محصول به‌روزرسانی شد.", reply_markup=main_menu(update.effective_user.id)
+        )
+    except (ValueError, httpx.HTTPError):
+        await update.message.reply_text("❌ مقدار واردشده معتبر نیست.")
+        return EDIT_VALUE
+    context.user_data.pop("editing_product_id", None)
+    context.user_data.pop("editing_field", None)
+    return ConversationHandler.END
+
+
+async def manage_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    product_id = context.user_data.get("photo_product_id")
+    if not product_id:
+        return
+    product = await call_api("GET", f"/products/{product_id}")
+    existing = [p for p in (product.get("original_photo_path") or "").split("|") if p]
+    paths = context.user_data.setdefault("photo_paths", [])
+    filename = f"product_{product_id}_{int(__import__('time').time() * 1000)}_{len(existing) + len(paths) + 1}.jpg"
+    saved = await download_photo(update, filename)
+    if saved:
+        paths.append(f"photos/{filename}")
+    await update.message.reply_text(f"✅ عکس {len(paths)} دریافت شد.")
+    return ADD_PHOTOS
+
+
+async def finish_manage_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    product_id = context.user_data.get("photo_product_id")
+    new_paths = context.user_data.get("photo_paths", [])
+    if product_id and new_paths:
+        product = await call_api("GET", f"/products/{product_id}")
+        existing = [p for p in (product.get("original_photo_path") or "").split("|") if p]
+        await call_api(
+            "PUT",
+            f"/products/{product_id}",
+            data={"original_photo_path": "|".join(existing + new_paths)},
+        )
+    context.user_data.pop("photo_product_id", None)
+    context.user_data.pop("photo_paths", None)
+    await query.message.reply_text("✅ عکس‌ها به محصول اضافه شدند.")
+    return ConversationHandler.END
+
+
+async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text == BTN_LIST:
+        await cmd_list(update, context)
+    elif text == BTN_SEARCH:
+        context.user_data["awaiting_search"] = True
+        await update.message.reply_text(
+            "🔍 نام، دسته یا ویژگی محصول را بنویسید:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    elif text == BTN_IMPORT:
+        await import_excel_start(update, context)
+    elif text == BTN_PRICE_VIEW:
+        await cmd_price_settings(update, context)
+
+
+async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.pop("awaiting_search", False):
+        return
+    keyword = update.message.text.strip()
+    products = await call_api("GET", "/products")
+    kw = keyword.lower()
+    results = [
+        p for p in products
+        if kw in p.get("name", "").lower()
+        or kw in p.get("description", "").lower()
+        or kw in p.get("category", "").lower()
+    ]
+    if not results:
+        await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
+    else:
+        text = f"🔍 نتایج جستجو برای «{keyword}» ({len(results)} مورد):\n\n"
+        for index, product in enumerate(results[:10], 1):
+            text += (
+                f"{index}. {product['name']}\n"
+                f"   💰 ${product['price_usd']} | 🏷️ {product.get('category', '-')}"
+                f" | 📍 {product.get('location', '-')} | ID: {product['id']}\n\n"
+            )
+        await update.message.reply_text(text)
+    await update.message.reply_text(
+        "از منوی زیر انتخاب کنید:", reply_markup=main_menu(update.effective_user.id)
     )
 
 
@@ -615,15 +885,20 @@ async def _send_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     page_items = products[start:end]
 
     for idx, p in enumerate(page_items, start=start):
+        final_price = calculate_toman(
+            p.get("price_usd", 0),
+            p.get("weight_grams"),
+        )
         text = (
             f"📦 **{p['name']}**\n"
             f"💰 ${p['price_usd']}  |  📏 {p.get('size', '-')}  |  🏷️ {p.get('category', '-')}\n"
-            f"📍 {p.get('location', '-')}  |  ID: {p['id']}"
+            f"📍 {p.get('location', '-')}  |  ID: {p['id']}\n"
+            f"💵 قیمت نهایی: {toman(final_price)}"
         )
         # Try to send photo
         raw_paths = p.get("original_photo_path") or ""
         photo_paths = [path for path in raw_paths.split("|") if path]
-        sent_photo = False
+        existing_paths = []
         for photo_path in photo_paths:
             if os.path.isabs(photo_path):
                 full = photo_path
@@ -631,18 +906,50 @@ async def _send_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 full = os.path.join(os.path.dirname(os.path.abspath(__file__)), photo_path)
             if not os.path.exists(full):
                 continue
+            existing_paths.append(full)
+
+        sent_photo = False
+        controls = None
+        if is_admin(update.effective_user.id):
+            controls = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✏️ ویرایش", callback_data=f"edit_product:{p['id']}"),
+                    InlineKeyboardButton("📷 افزودن عکس", callback_data=f"photo_product:{p['id']}"),
+                ],
+                [InlineKeyboardButton("🗑 حذف", callback_data=f"delete_product:{p['id']}")],
+            ])
+        if existing_paths:
+            handles = []
             try:
-                with open(full, "rb") as photo_file:
-                    await update.effective_message.reply_photo(
-                        photo=photo_file, caption=text if not sent_photo else None,
-                        parse_mode="Markdown" if not sent_photo else None,
+                for full in existing_paths:
+                    handles.append(open(full, "rb"))
+                media = [
+                    InputMediaPhoto(
+                        media=handle,
+                        caption=text if index == 0 else None,
+                        parse_mode="Markdown" if index == 0 else None,
                     )
+                    for index, handle in enumerate(handles)
+                ]
+                await update.effective_message.reply_media_group(media=media)
                 sent_photo = True
+                if controls:
+                    await update.effective_message.reply_text(
+                        "عملیات محصول را انتخاب کنید:",
+                        reply_markup=controls,
+                    )
             except Exception as exc:
-                logger.warning("Could not send photo %s: %s", full, exc)
+                logger.warning("Could not send product album: %s", exc)
+            finally:
+                for handle in handles:
+                    handle.close()
 
         if not sent_photo:
-            await update.effective_message.reply_text(text, parse_mode="Markdown")
+            await update.effective_message.reply_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=controls,
+            )
 
     # Navigation buttons
     buttons = []
@@ -742,7 +1049,10 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     settings_handler = ConversationHandler(
-        entry_points=[CommandHandler("settings", settings_start)],
+        entry_points=[
+            CommandHandler("settings", settings_start),
+            MessageHandler(filters.Regex(f"^{BTN_SETTINGS}$"), settings_start),
+        ],
         states={
             SET_USD_RATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_usd_rate),
@@ -765,9 +1075,44 @@ def main():
     )
     application.add_handler(settings_handler)
 
+    product_management_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                manage_product_callback,
+                pattern=r"^(edit_product|photo_product):\d+$",
+            )
+        ],
+        states={
+            EDIT_FIELD: [
+                CallbackQueryHandler(edit_field_callback, pattern="^edit_field:")
+            ],
+            EDIT_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value),
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+            ],
+            ADD_PHOTOS: [
+                MessageHandler(filters.PHOTO, manage_photo_message),
+                CallbackQueryHandler(
+                    finish_manage_photos, pattern="^finish_manage_photos$"
+                ),
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(cancel, pattern="^cancel$"),
+        ],
+        conversation_timeout=STAGE_TIMEOUT,
+        allow_reentry=True,
+    )
+    application.add_handler(product_management_handler)
+
     # Conversation handler for /add
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", add_start)],
+        entry_points=[
+            CommandHandler("add", add_start),
+            MessageHandler(filters.Regex(f"^{BTN_ADD}$"), add_start),
+        ],
         states={
             NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_name),
@@ -827,6 +1172,25 @@ def main():
     application.add_handler(CommandHandler("delete", cmd_delete))
     application.add_handler(CommandHandler("search", cmd_search))
     application.add_handler(CommandHandler("price_settings", cmd_price_settings))
+    application.add_handler(
+        MessageHandler(filters.Document.FileExtension("xlsx"), import_excel_document)
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            manage_product_callback, pattern=r"^delete_product:\d+$"
+        )
+    )
+    application.add_handler(
+            MessageHandler(
+            filters.Regex(
+                f"^(?:{BTN_LIST}|{BTN_SEARCH}|{BTN_IMPORT}|{BTN_PRICE_VIEW})$"
+            ),
+            menu_button,
+        )
+    )
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, receive_search_text)
+    )
     application.add_handler(
         CallbackQueryHandler(list_callback, pattern="^list_(next|prev)$")
     )
