@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>موجودی تهران | جستجوی محصولات</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="header-top">
+                <h1><i class="fas fa-warehouse"></i> موجودی تهران</h1>
+                <button id="admin-toggle" class="btn-admin">
+                    <i class="fas fa-user-shield"></i> ورود ادمین
+                </button>
+            </div>
+            <p class="subtitle">جستجوی هوشمند محصولات موجود در انبار تهران</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <div class="search-controls">
+            <div class="search-box">
+                <i class="fas fa-search"></i>
+                <input type="text" id="search-input" placeholder="نام محصول، برند یا توضیحات را وارد کنید...">
+            </div>
+            <div class="filters">
+                <select id="category-filter">
+                    <option value="">همه دسته‌ها</option>
+                    <option value="کفش">کفش</option>
+                    <option value="صندل مردانه">صندل مردانه</option>
+                    <option value="کفش بچگانه">کفش بچگانه</option>
+                    <option value="کیف">کیف</option>
+                </select>
+                <div class="price-range">
+                    <input type="number" id="min-price" placeholder="حداقل قیمت ($)" min="0">
+                    <span>تا</span>
+                    <input type="number" id="max-price" placeholder="حداکثر قیمت ($)" min="0">
+                </div>
+                <button id="apply-filters" class="btn-primary">
+                    <i class="fas fa-filter"></i> اعمال فیلتر
+                </button>
+                <button id="reset-filters" class="btn-secondary">
+                    <i class="fas fa-redo"></i> ریست
+                </button>
+            </div>
+        </div>
+
+        <!-- بخش تنظیمات قیمت (فقط برای ادمین) -->
+        <div class="price-settings" id="price-settings" style="display: none;">
+            <h3><i class="fas fa-calculator"></i> تنظیمات قیمت‌گذاری (ادمین)</h3>
+            <div class="settings-form">
+                <div class="input-group">
+                    <label for="usd-rate">نرخ دلار (تومان)</label>
+                    <input type="number" id="usd-rate" value="200000">
+                </div>
+                <div class="input-group">
+                    <label for="shipping-per-kg">هزینه حمل (تومان/کیلوگرم)</label>
+                    <input type="number" id="shipping-per-kg" value="8000000">
+                </div>
+                <div class="input-group">
+                    <label for="multiplier">ضریب قیمت</label>
+                    <input type="number" id="multiplier" value="1.5" step="0.1">
+                </div>
+                <button id="save-settings" class="btn-primary">
+                    <i class="fas fa-save"></i> ذخیره تنظیمات
+                </button>
+                <button id="logout-admin" class="btn-secondary">
+                    <i class="fas fa-sign-out-alt"></i> خروج ادمین
+                </button>
+            </div>
+        </div>
+
+        <div class="products-container">
+            <div class="products-header">
+                <h2><i class="fas fa-boxes"></i> محصولات</h2>
+                <div class="sort-controls">
+                    <select id="sort-by">
+                        <option value="name">مرتب‌سازی: نام</option>
+                        <option value="price">مرتب‌سازی: قیمت (کم به زیاد)</option>
+                        <option value="price-desc">مرتب‌سازی: قیمت (زیاد به کم)</option>
+                        <option value="weight">مرتب‌سازی: وزن</option>
+                    </select>
+                    <span class="product-count" id="product-count">8 محصول</span>
+                </div>
+            </div>
+            <div id="products-list" class="products-list">
+                <!-- محصولات با جاوااسکریپت ساخته می‌شوند -->
+                <div class="loading">
+                    <i class="fas fa-spinner fa-spin"></i> در حال بارگذاری محصولات...
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>© ۱۴۰۵ - سیستم موجودی تهران | نسخه MVP</p>
+            <p class="footer-note">برای استفاده ادمین: روی دکمه "ورود ادمین" در بالای صفحه کلیک کنید</p>
+            <p class="footer-note">اطلاعات ورود ادمین در کد منبع ذخیره نمی‌شود.</p>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
