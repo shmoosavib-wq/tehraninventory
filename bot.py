@@ -8,6 +8,9 @@ Tehran Inventory Bot
 import os
 import logging
 import re
+import base64
+import json
+from difflib import SequenceMatcher
 from typing import Optional
 
 import httpx
@@ -71,8 +74,8 @@ logger = logging.getLogger(__name__)
     NAME, PRICE, SIZE, WEIGHT, CATEGORY,
     LOCATION, DESCRIPTION, PHOTO, CONFIRM,
     SET_USD_RATE, SET_SHIPPING, SET_MULTIPLIER,
-    EDIT_FIELD, EDIT_VALUE, ADD_PHOTOS,
-) = range(15)
+    EDIT_FIELD, EDIT_VALUE, ADD_PHOTOS, PHOTO_AI,
+) = range(16)
 
 # Timeout per stage (seconds)
 STAGE_TIMEOUT = 300
@@ -80,6 +83,7 @@ STAGE_TIMEOUT = 300
 BTN_LIST = "📦 لیست محصولات"
 BTN_SEARCH = "🔍 جستجوی محصول"
 BTN_ADD = "➕ افزودن محصول"
+BTN_ADD_PHOTO = "🖼 افزودن با عکس"
 BTN_SETTINGS = "⚙️ تنظیم قیمت"
 BTN_PRICE_VIEW = "💰 قیمت فعلی"
 BTN_IMPORT = "📥 ورود اکسل"
@@ -89,7 +93,8 @@ BTN_MANAGE = "🛠 مدیریت محصولات"
 def main_menu(user_id: int) -> ReplyKeyboardMarkup:
     rows = [[BTN_LIST, BTN_SEARCH]]
     if is_admin(user_id):
-        rows.append([BTN_ADD, BTN_IMPORT])
+        rows.append([BTN_ADD, BTN_ADD_PHOTO])
+        rows.append([BTN_IMPORT])
         rows.append([BTN_SETTINGS])
         rows.append([BTN_PRICE_VIEW])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -115,7 +120,29 @@ def normalize_search_text_v2(value: str) -> str:
         value = value.replace(source, target)
     value = re.sub(r"[\u064b-\u065f\u0670]", "", value)
     value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"\s+", " ", value).strip()
+    aliases = {
+        "نایک": "nike", "نایکی": "nike", "nike": "nike",
+        "آدیداس": "adidas", "ادیداس": "adidas", "adidas": "adidas",
+        "پوما": "puma", "پیوما": "puma", "puma": "puma",
+        "اسمارو": "esmaro", "esmaro": "esmaro",
+        "شنل": "chanel", "چنل": "chanel", "chanel": "chanel",
+        "channel": "chanel", "بلو": "bleu", "bleu": "bleu",
+    }
+    for source, target in aliases.items():
+        value = re.sub(rf"(?<!\w){re.escape(source)}(?!\w)", target, value)
+    return value
+
+
+def search_token_similarity(query_token: str, searchable_tokens: list[str]) -> float:
+    if query_token in searchable_tokens:
+        return 1.0
+    if len(query_token) < 3:
+        return 0.0
+    return max(
+        (SequenceMatcher(None, query_token, token).ratio() for token in searchable_tokens),
+        default=0.0,
+    )
 
 
 def normalize_query_for_search(value: str) -> str:
@@ -144,6 +171,35 @@ def product_size(product: dict) -> str:
         flags=re.IGNORECASE,
     )
     return match.group(1).strip() if match else "-"
+
+
+def clean_product_description(product: dict) -> str:
+    """Remove duplicated structured metadata from imported free-form text."""
+    raw = str(product.get("description") or "").replace("\r\n", "\n")
+    name = normalize_search_text_v2(str(product.get("name") or ""))
+    cleaned = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        normalized = normalize_search_text_v2(stripped)
+        if not stripped:
+            continue
+        if name and normalized == name:
+            continue
+        if re.fullmatch(r"[\d۰-۹٠-٩]+(?:[.,/]\d+)?\s*\$?", stripped):
+            continue
+        if re.search(r"[\d۰-۹٠-٩]+\s*(?:gr|g|گرم)\b", normalized, re.I):
+            continue
+        if re.fullmatch(r"[\d۰-۹٠-٩]{1,2}\s*[/.-]\s*[\d۰-۹٠-٩]{1,4}", stripped):
+            continue
+        if "برای ثبت سفارش" in stripped or stripped.startswith("@"):
+            continue
+        cleaned.append(stripped)
+    return "\n".join(cleaned).strip() or "توضیحی ثبت نشده است."
+
+
+def display_product_name(product: dict, limit: int = 55) -> str:
+    name = str(product.get("name") or "محصول بدون نام").strip()
+    return name if len(name) <= limit else name[: limit - 1].rstrip() + "…"
 
 
 def extract_price_max(query: str) -> float | None:
@@ -283,6 +339,45 @@ async def generate_ai_description(product: dict) -> str:
         return content.strip()
 
 
+async def extract_product_from_photos(photo_paths: list[str]) -> dict:
+    if not OPENAI_API_KEY:
+        return {}
+    content = [{
+        "type": "text",
+        "text": (
+            "از عکس‌های محصول اطلاعات قابل مشاهده را استخراج کن. فقط JSON معتبر برگردان "
+            "با کلیدهای name, category, size, weight_grams, description. اگر چیزی معلوم نیست null بگذار. "
+            "قیمت را استخراج نکن مگر واضح و دلاری باشد."
+        ),
+    }]
+    for path in photo_paths[:3]:
+        with open(path, "rb") as image_file:
+            encoded = base64.b64encode(image_file.read()).decode("ascii")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
+        })
+    async with httpx.AsyncClient(timeout=45) as client:
+        response = await client.post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": OPENAI_MODEL,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": 0.1,
+                "max_tokens": 350,
+            },
+        )
+        response.raise_for_status()
+        raw = response.json()["choices"][0]["message"]["content"].strip()
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.IGNORECASE).strip()
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+
 async def download_photo(update: Update, filename: str) -> str | None:
     """Download the largest photo and save to PHOTOS_DIR. Return path or None."""
     if not update.message or not update.message.photo:
@@ -304,6 +399,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "یکی از گزینه‌های زیر را انتخاب کنید:"
     )
     await update.message.reply_text(text, reply_markup=main_menu(user.id))
+
+
+async def restart_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow /start to escape any active settings/product conversation."""
+    context.user_data.clear()
+    await cmd_start(update, context)
+    return ConversationHandler.END
 
 
 # ── Command: /help ───────────────────────────────────────────
@@ -652,6 +754,7 @@ async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             str(product.get(field) or "")
             for field in ("name", "description", "category", "location", "size")
         ))
+        searchable_tokens = searchable.split()
         female_shoe_query = (
             any(term in query_normalized for term in ("بچگانه", "زنانه"))
             and "کفش" in query_normalized
@@ -659,16 +762,20 @@ async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         if female_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
             if not any(term in searchable for term in ("دخترانه", "زنانه", "بچگانه")):
                 continue
-        token_hits = sum(token in searchable for token in query_tokens)
+        token_scores = [
+            search_token_similarity(token, searchable_tokens)
+            for token in query_tokens
+        ]
+        token_hits = sum(score >= 0.72 for score in token_scores)
         if male_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
             if "زنانه" not in searchable and "بچگانه" not in searchable:
                 token_hits += 2
         if query_normalized in searchable or (
-            query_tokens and token_hits >= len(query_tokens)
+            query_tokens and token_hits == len(query_tokens)
         ):
-            ranked.append((2, token_hits, product))
-        elif token_hits and len(query_tokens) == 1:
-            ranked.append((1, token_hits, product))
+            ranked.append((2, sum(token_scores), product))
+        elif token_hits and len(query_tokens) == 1 and token_scores[0] >= 0.78:
+            ranked.append((1, sum(token_scores), product))
     results = [
         product for _, _, product in sorted(
             ranked, key=lambda item: (item[0], item[1]), reverse=True
@@ -707,6 +814,7 @@ async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYP
             str(product.get(field) or "")
             for field in ("name", "description", "category", "location", "size")
         ))
+        searchable_tokens = searchable.split()
         female_shoe_query = (
             any(term in query_normalized for term in ("بچگانه", "زنانه"))
             and "کفش" in query_normalized
@@ -714,16 +822,20 @@ async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYP
         if female_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
             if not any(term in searchable for term in ("دخترانه", "زنانه", "بچگانه")):
                 continue
-        token_hits = sum(token in searchable for token in query_tokens)
+        token_scores = [
+            search_token_similarity(token, searchable_tokens)
+            for token in query_tokens
+        ]
+        token_hits = sum(score >= 0.72 for score in token_scores)
         if male_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
             if "زنانه" not in searchable and "بچگانه" not in searchable:
                 token_hits += 2
         if query_normalized in searchable or (
-            query_tokens and token_hits >= len(query_tokens)
+            query_tokens and token_hits == len(query_tokens)
         ):
-            ranked.append((2, token_hits, product))
-        elif token_hits and len(query_tokens) == 1:
-            ranked.append((1, token_hits, product))
+            ranked.append((2, sum(token_scores), product))
+        elif token_hits and len(query_tokens) == 1 and token_scores[0] >= 0.78:
+            ranked.append((1, sum(token_scores), product))
     results = [
         product for _, _, product in sorted(
             ranked, key=lambda item: (item[0], item[1]), reverse=True
@@ -739,7 +851,7 @@ async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYP
             final_price = calculate_toman(
                 product.get("price_usd", 0), product.get("weight_grams")
             )
-            description = (product.get("description") or "توضیحی ثبت نشده است.").strip()
+            description = clean_product_description(product)
             description = description[:217] + "..." if len(description) > 220 else description
             caption = (
                 f"📏 سایز: {product_size(product)}\n"
@@ -789,6 +901,82 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=cancel_keyboard(),
     )
     return NAME
+
+
+async def add_photo_ai_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ فقط ادمین می‌تواند محصول اضافه کند.")
+        return ConversationHandler.END
+    context.user_data.clear()
+    context.user_data["product"] = {"photo_paths": []}
+    await update.message.reply_text(
+        "🖼 لطفاً یک تا سه عکس از محصول را بفرستید. بعد از اولین عکس، دکمه اتمام نمایش داده می‌شود.",
+        reply_markup=cancel_keyboard(),
+    )
+    return PHOTO_AI
+
+
+async def add_photo_ai_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    product = context.user_data["product"]
+    if len(product["photo_paths"]) >= 3:
+        await update.message.reply_text("حداکثر سه عکس مجاز است.")
+        return PHOTO_AI
+    filename = f"ai_product_{update.effective_user.id}_{len(product['photo_paths']) + 1}.jpg"
+    filepath = await download_photo(update, filename)
+    if filepath:
+        product["photo_paths"].append(filepath)
+        product["original_photo_path"] = "|".join(
+            f"photos/{os.path.basename(path)}" for path in product["photo_paths"]
+        )
+    await update.message.reply_text(
+        f"✅ عکس {len(product['photo_paths'])} دریافت شد. عکس بعدی را بفرستید یا اتمام عکس‌ها را بزنید.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ اتمام عکس‌ها", callback_data="ai_finish_photos"),
+            InlineKeyboardButton("❌ لغو", callback_data="cancel"),
+        ]]),
+    )
+    return PHOTO_AI
+
+
+async def add_photo_ai_finish_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow finishing photo collection by typing the button label."""
+    product = context.user_data.get("product", {})
+    if not product.get("photo_paths"):
+        await update.message.reply_text("حداقل یک عکس بفرستید.")
+        return PHOTO_AI
+    await update.message.reply_text("🔎 در حال بررسی عکس‌ها…")
+    try:
+        extracted = await extract_product_from_photos(product["photo_paths"])
+        product.update({k: v for k, v in extracted.items() if v not in (None, "")})
+    except Exception as exc:
+        logger.warning("Photo extraction failed: %s", exc)
+    if not product.get("name"):
+        await update.message.reply_text("نام محصول از عکس مشخص نشد. لطفاً نام محصول را وارد کنید:")
+        return NAME
+    await update.message.reply_text("اطلاعات اولیه آماده شد. حالا قیمت دلار را وارد کنید:")
+    return PRICE
+
+
+async def add_photo_ai_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    product = context.user_data["product"]
+    if not product.get("photo_paths"):
+        await query.message.reply_text("حداقل یک عکس بفرستید.")
+        return PHOTO_AI
+    await query.message.reply_text("🔎 در حال بررسی عکس‌ها…")
+    try:
+        extracted = await extract_product_from_photos(product["photo_paths"])
+        product.update({k: v for k, v in extracted.items() if v not in (None, "")})
+    except Exception as exc:
+        logger.warning("Photo extraction failed: %s", exc)
+    if not product.get("name"):
+        await query.message.reply_text(
+            "نام محصول از عکس مشخص نشد. لطفاً نام محصول را وارد کنید:"
+        )
+        return NAME
+    await query.message.reply_text("اطلاعات اولیه آماده شد. حالا قیمت دلار را وارد کنید:")
+    return PRICE
 
 
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -880,6 +1068,12 @@ async def _goto_category(update: Update):
                 InlineKeyboardButton("اکسسوری", callback_data="cat_اکسسوری"),
             ],
             [
+                InlineKeyboardButton("عطر و ادکلن", callback_data="cat_عطر و ادکلن"),
+            ],
+            [
+                InlineKeyboardButton("لباس", callback_data="cat_لباس"),
+            ],
+            [
                 InlineKeyboardButton("دارو و سلامتی", callback_data="cat_دارو و سلامتی"),
                 InlineKeyboardButton("سایر", callback_data="cat_سایر"),
             ],
@@ -934,10 +1128,14 @@ async def add_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["product"]["description"] = update.message.text.strip()
+    if context.user_data["product"].get("photo_paths"):
+        return await _goto_confirm(update, context)
     return await _goto_photo(update)
 
 
 async def add_description_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data["product"].get("photo_paths"):
+        return await _goto_confirm(update, context)
     return await _goto_photo(update)
 
 
@@ -1083,7 +1281,7 @@ async def stage_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Command: /list (paginated, with photos) ──────────────────
-LIST_PAGE_SIZE = 12
+LIST_PAGE_SIZE = 15
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1098,7 +1296,9 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 محصولی موجود نیست.")
         return
 
-    context.user_data["list_products"] = products
+    context.user_data["all_products"] = products
+    await _send_category_page(update, context)
+    return
     context.user_data["list_page"] = 0
     context.user_data["list_title"] = "📦 فهرست محصولات"
     await _send_product_page(update, context, 0)
@@ -1114,7 +1314,7 @@ async def _send_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     buttons = []
     for p in page_items:
         photo_mark = "🖼" if p.get("original_photo_path") else "▫️"
-        label = f"{photo_mark} {p['name'][:35]} — ${p['price_usd']}"
+        label = f"{photo_mark} {display_product_name(p, 35)} — ${p['price_usd']}"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"product_detail:{p['id']}")
         ])
@@ -1126,10 +1326,29 @@ async def _send_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
         nav.append(InlineKeyboardButton("➡️ بعدی", callback_data="list_next"))
     if nav:
         buttons.append(nav)
+    buttons.append([
+        InlineKeyboardButton("📂 دسته‌بندی‌ها", callback_data="list_categories")
+    ])
     title = context.user_data.get("list_title", "📦 فهرست محصولات")
     await update.effective_message.reply_text(
         f"{title}\nمحصولات {start + 1}-{min(end, total)} از {total}\n"
         "برای مشاهده جزئیات، یک محصول را انتخاب کنید.",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def _send_category_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    products = context.user_data.get("all_products", [])
+    counts = {}
+    for product in products:
+        category = (product.get("category") or "سایر").strip()
+        counts[category] = counts.get(category, 0) + 1
+    buttons = [
+        [InlineKeyboardButton(f"🏷️ {category} ({count})", callback_data=f"category:{category}")]
+        for category, count in sorted(counts.items())
+    ]
+    await update.effective_message.reply_text(
+        "📂 دسته‌بندی محصولات\nیک دسته را برای مشاهده محصولات انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -1142,8 +1361,25 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page += 1
     elif query.data == "list_prev":
         page = max(0, page - 1)
+    elif query.data == "list_categories":
+        await _send_category_page(update, context)
+        return
     context.user_data["list_page"] = page
     await _send_product_page(update, context, page)
+
+
+async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = query.data.split(":", 1)[1]
+    products = [
+        product for product in context.user_data.get("all_products", [])
+        if (product.get("category") or "سایر").strip() == category
+    ]
+    context.user_data["list_products"] = products
+    context.user_data["list_page"] = 0
+    context.user_data["list_title"] = f"📂 {category}"
+    await _send_product_page(update, context, 0)
 
 
 async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1160,7 +1396,7 @@ async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_
         f"⚖️ وزن: {product.get('weight_grams') or '-'} گرم\n"
         f"🏷️ دسته: {product.get('category') or '-'}\n"
         f"📍 موقعیت: {product.get('location') or '-'}\n"
-        f"📝 توضیحات:\n{product.get('description') or 'ندارد'}"
+        f"📝 توضیحات:\n{clean_product_description(product)}"
     )
     raw_paths = product.get("original_photo_path") or ""
     existing_paths = []
@@ -1314,14 +1550,17 @@ def main():
         ],
         states={
             SET_USD_RATE: [
+                CommandHandler("start", restart_conversation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_usd_rate),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
             SET_SHIPPING: [
+                CommandHandler("start", restart_conversation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_shipping),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
             SET_MULTIPLIER: [
+                CommandHandler("start", restart_conversation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_multiplier),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
@@ -1371,8 +1610,18 @@ def main():
         entry_points=[
             CommandHandler("add", add_start),
             MessageHandler(filters.Regex(f"^{BTN_ADD}$"), add_start),
+            MessageHandler(filters.Regex(f"^{BTN_ADD_PHOTO}$"), add_photo_ai_start),
         ],
         states={
+            PHOTO_AI: [
+                MessageHandler(filters.PHOTO, add_photo_ai_receive),
+                MessageHandler(
+                    filters.Regex(r"^(✅\s*)?اتمام عکس‌ها$"),
+                    add_photo_ai_finish_text,
+                ),
+                CallbackQueryHandler(add_photo_ai_finish, pattern="^ai_finish_photos$"),
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+            ],
             NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_name),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
@@ -1457,7 +1706,10 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_search_cards)
     )
     application.add_handler(
-        CallbackQueryHandler(list_callback, pattern="^list_(next|prev)$")
+        CallbackQueryHandler(list_callback, pattern="^list_(next|prev|categories)$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(category_callback, pattern=r"^category:")
     )
 
     print("Bot is starting...")
