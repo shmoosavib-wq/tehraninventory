@@ -49,6 +49,7 @@ if not BOT_TOKEN:
 PHOTOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photos")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+ADMIN_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admins.json")
 DEFAULT_SETTINGS = {
     "usd_rate": 200000,
     "shipping_per_kg": 8000000,
@@ -61,6 +62,28 @@ ADMIN_IDS = set(
     for x in os.environ.get("ADMIN_IDS", "62414083").replace(" ", "").split(",")
     if x
 )
+
+SUPER_ADMIN_IDS = set(int(x) for x in os.environ.get("SUPER_ADMIN_IDS", "62414083").replace(" ", "").split(",") if x)
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
+def category_access(user_id: int) -> set[str]:
+    if is_super_admin(user_id):
+        return {"*"}
+    config = load_admin_config()
+    saved = config.get(str(user_id))
+    if isinstance(saved, dict):
+        return set(saved.get("categories") or [])
+    raw = os.environ.get("ADMIN_CATEGORY_ACCESS", "")
+    for entry in raw.split(";"):
+        if ":" not in entry: continue
+        uid, cats = entry.split(":", 1)
+        if uid.strip() == str(user_id): return {c.strip() for c in cats.split("|") if c.strip()}
+    return set()
+
+def can_manage_product(user_id: int, product: dict) -> bool:
+    return is_super_admin(user_id) or (product.get("category") or "سایر").strip() in category_access(user_id)
 
 # ── Logging ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -84,6 +107,9 @@ BTN_LIST = "📦 لیست محصولات"
 BTN_SEARCH = "🔍 جستجوی محصول"
 BTN_ADD = "➕ افزودن محصول"
 BTN_ADD_PHOTO = "🖼 افزودن با عکس"
+BTN_ADD_HELP = "ℹ️ راهنمای ثبت محصول"
+BTN_ADMIN_MANAGE = "👥 مدیریت ادمین‌ها"
+ADMIN_CATEGORIES = ["کفش", "کیف", "لباس", "ورزشی", "آرایشی بهداشتی", "اکسسوری", "دارو و سلامتی", "عطر و ادکلن"]
 BTN_SETTINGS = "⚙️ تنظیم قیمت"
 BTN_PRICE_VIEW = "💰 قیمت فعلی"
 BTN_IMPORT = "📥 ورود اکسل"
@@ -94,6 +120,9 @@ def main_menu(user_id: int) -> ReplyKeyboardMarkup:
     rows = [[BTN_LIST, BTN_SEARCH]]
     if is_admin(user_id):
         rows.append([BTN_ADD, BTN_ADD_PHOTO])
+        rows.append([BTN_ADD_HELP])
+        if is_super_admin(user_id):
+            rows.append([BTN_ADMIN_MANAGE])
         rows.append([BTN_IMPORT])
         rows.append([BTN_SETTINGS])
         rows.append([BTN_PRICE_VIEW])
@@ -213,8 +242,20 @@ def extract_price_max(query: str) -> float | None:
     return float(match.group(1)) if match else None
 
 # ── Helpers ───────────────────────────────────────────────────
+def load_admin_config() -> dict:
+    try:
+        with open(ADMIN_CONFIG_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def save_admin_config(data: dict) -> None:
+    with open(ADMIN_CONFIG_FILE, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    return user_id in ADMIN_IDS or str(user_id) in load_admin_config() or is_super_admin(user_id)
 
 
 def load_settings() -> dict:
@@ -508,8 +549,13 @@ async def import_excel_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     context.user_data["awaiting_excel"] = True
     await update.message.reply_text(
-        "📥 فایل Excel با پسوند xlsx را ارسال کنید.\n"
-        "قیمت نهایی از تنظیمات بات محاسبه می‌شود و از Excel خوانده نمی‌شود."
+        "📥 راهنمای ورود گروهی با Excel\n\n"
+        "هر ردیف Excel یک محصول است.\n"
+        "نام، قیمت دلار و دسته‌بندی را وارد کنید؛ قیمت نهایی خودکار محاسبه می‌شود.\n"
+        "برای عکس، فقط نام فایل را در ستون عکس ۱ تا عکس ۳ بنویسید.\n"
+        "سپس فایل xlsx را همین‌جا ارسال کنید.\n\n"
+        "اگر فقط چند محصول دارید، «➕ افزودن محصول» یا «🖼 افزودن با عکس» سریع‌تر است.\n\n"
+        "حالا فایل Excel را ارسال کنید."
     )
 
 
@@ -552,6 +598,7 @@ async def import_excel_document(update: Update, context: ContextTypes.DEFAULT_TY
                 payload = {
                     "name": str(name).strip(),
                     "price_usd": float(price),
+                    "owner_admin_id": update.effective_user.id,
                 }
                 field_map = {
                     "توضیحات دستی": "description",
@@ -596,7 +643,11 @@ async def manage_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not products:
         await update.message.reply_text("📭 محصولی وجود ندارد.")
         return
+    visible = 0
     for product in products:
+        if not can_manage_product(update.effective_user.id, product):
+            continue
+        visible += 1
         buttons = [
             [
                 InlineKeyboardButton("✏️ ویرایش", callback_data=f"edit_product:{product['id']}"),
@@ -608,6 +659,8 @@ async def manage_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 {product['name']}\nID: {product['id']} | ${product['price_usd']}",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+    if visible == 0:
+        await update.message.reply_text("⛔ برای دسته‌بندی‌های شما محصولی ثبت نشده است.")
 
 
 async def manage_product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -618,6 +671,10 @@ async def manage_product_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     action, product_id_text = query.data.split(":", 1)
     product_id = int(product_id_text)
+    current_product = await call_api("GET", f"/products/{product_id}")
+    if not can_manage_product(query.from_user.id, current_product):
+        await query.message.reply_text("⛔ شما به این دسته‌بندی دسترسی ندارید.")
+        return
     if action == "delete_product":
         await call_api("DELETE", f"/products/{product_id}")
         await query.message.reply_text("✅ محصول حذف شد.")
@@ -721,7 +778,49 @@ async def finish_manage_photos(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_super_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
+        return
+    config = load_admin_config()
+    lines = ["👥 مدیریت ادمین‌ها", "", "ادمین‌های فعلی:"]
+    if config:
+        for uid, info in config.items():
+            cats = ", ".join(info.get("categories", [])) or "بدون دسته"
+            lines.append(f"🆔 {uid}\n   🏷️ {cats}")
+    else:
+        lines.append("هنوز ادمینی ثبت نشده است.")
+    lines.append("\nبرای افزودن ادمین جدید، دکمه زیر را بزنید.")
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ افزودن ادمین", callback_data="admin_add")]]))
+
+async def admin_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_super_admin(query.from_user.id): return
+    context.user_data["awaiting_new_admin_id"] = True
+    await query.message.reply_text("🆔 آیدی عددی تلگرام ادمین جدید را ارسال کنید:", reply_markup=cancel_keyboard())
+
+async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_super_admin(query.from_user.id): return
+    selected = set(context.user_data.get("new_admin_categories", []))
+    cat = query.data.split(":", 1)[1]
+    if cat == "done":
+        if not selected:
+            await query.message.reply_text("حداقل یک دسته را انتخاب کنید.")
+            return
+        config = load_admin_config(); uid = str(context.user_data["new_admin_id"])
+        config[uid] = {"categories": sorted(selected)}; save_admin_config(config); ADMIN_IDS.add(int(uid))
+        context.user_data.pop("new_admin_id", None); context.user_data.pop("new_admin_categories", None)
+        await query.message.reply_text("✅ ادمین و دسته‌های مجاز ذخیره شد.", reply_markup=main_menu(query.from_user.id)); return
+    if cat in selected: selected.remove(cat)
+    else: selected.add(cat)
+    context.user_data["new_admin_categories"] = list(selected)
+    buttons = [[InlineKeyboardButton(("✅ " if c in selected else "▫️ ")+c, callback_data="admin_cat:"+c)] for c in ADMIN_CATEGORIES]
+    buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+
     text = (update.message.text or "").strip()
     if text == BTN_LIST:
         await cmd_list(update, context)
@@ -735,7 +834,34 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await import_excel_start(update, context)
     elif text == BTN_PRICE_VIEW:
         await cmd_price_settings(update, context)
+    elif text == BTN_ADD_HELP:
+        await add_help(update, context)
+    elif text == BTN_ADMIN_MANAGE:
+        await admin_manage_start(update, context)
 
+
+async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if context.user_data.pop("awaiting_new_admin_id", False):
+        try: admin_id = int(text)
+        except ValueError:
+            await update.message.reply_text("آیدی باید عددی باشد.")
+            context.user_data["awaiting_new_admin_id"] = True
+            return
+        context.user_data["new_admin_id"] = admin_id
+        context.user_data["new_admin_categories"] = []
+        buttons = [[InlineKeyboardButton("▫️ "+c, callback_data="admin_cat:"+c)] for c in ADMIN_CATEGORIES]
+        buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
+        await update.message.reply_text("🏷️ دسته‌های مجاز را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+    if text == BTN_LIST: await cmd_list(update, context)
+    elif text == BTN_SEARCH:
+        context.user_data["awaiting_search"] = True
+        await update.message.reply_text("🔍 نام، دسته یا ویژگی محصول را بنویسید:", reply_markup=ReplyKeyboardRemove())
+    elif text == BTN_IMPORT: await import_excel_start(update, context)
+    elif text == BTN_PRICE_VIEW: await cmd_price_settings(update, context)
+    elif text == BTN_ADD_HELP: await add_help(update, context)
+    elif text == BTN_ADMIN_MANAGE: await admin_manage_start(update, context)
 
 async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.pop("awaiting_search", False):
@@ -903,6 +1029,26 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return NAME
 
 
+async def add_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ این راهنما فقط برای ادمین‌هاست.")
+        return
+    await update.message.reply_text(
+        "ℹ️ راهنمای ثبت محصول\n\n"
+        "➕ افزودن محصول: ثبت دستی مرحله‌به‌مرحله\n"
+        "🖼 افزودن با عکس: ارسال یک تا سه عکس؛ بات اطلاعات قابل تشخیص را استخراج می‌کند و شما موارد ناقص را تکمیل می‌کنید.\n"
+        "📥 ورود اکسل: ثبت تعداد زیادی محصول با یک فایل Excel.\n\n"
+        "ثبت دستی:\n"
+        "۱. نام محصول\n۲. قیمت خرید به دلار\n۳. سایز (اختیاری)\n"
+        "۴. وزن به گرم (اختیاری)\n۵. دسته‌بندی\n۶. موقعیت\n"
+        "۷. توضیحات\n۸. عکس‌های محصول\n\n"
+        "قیمت نهایی از نرخ دلار، ضریب، وزن و هزینه حمل محاسبه می‌شود.\n"
+        "برای خروج از هر مرحله، دکمه «لغو» را بزنید.\n\n"
+        "نمونه قیمت: 59.99\n"
+        "نمونه نام: کفش آدیداس سامبا"
+    )
+
+
 async def add_photo_ai_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ فقط ادمین می‌تواند محصول اضافه کند.")
@@ -910,7 +1056,15 @@ async def add_photo_ai_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data.clear()
     context.user_data["product"] = {"photo_paths": []}
     await update.message.reply_text(
-        "🖼 لطفاً یک تا سه عکس از محصول را بفرستید. بعد از اولین عکس، دکمه اتمام نمایش داده می‌شود.",
+        "🖼 راهنمای ثبت محصول با عکس\n\n"
+        "۱) یک تا سه عکس واضح از یک محصول بفرستید.\n"
+        "۲) بعد از هر عکس، «✅ اتمام عکس‌ها» را بزنید یا عکس بعدی را ارسال کنید.\n"
+        "۳) بات نام و اطلاعات قابل تشخیص را استخراج می‌کند.\n"
+        "۴) اگر چیزی پیدا نشود، خودتان اصلاح یا تکمیل می‌کنید.\n"
+        "۵) قیمت و سایر اطلاعات ناقص را وارد کنید.\n\n"
+        "نکته: عکس‌ها باید مربوط به یک محصول باشند.\n"
+        "برای خروج، «لغو» را بزنید.\n\n"
+        "لطفاً عکس اول را ارسال کنید.",
         reply_markup=cancel_keyboard(),
     )
     return PHOTO_AI
@@ -1090,6 +1244,9 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     cat = query.data.replace("cat_", "", 1)
+    if not is_super_admin(query.from_user.id) and cat not in category_access(query.from_user.id):
+        await query.message.reply_text("⛔ شما به این دسته‌بندی دسترسی ندارید.")
+        return ConversationHandler.END
     context.user_data["product"]["category"] = cat
     return await _goto_location(update, query)
 
@@ -1220,6 +1377,7 @@ async def add_confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payload = {
         "name": product["name"],
         "price_usd": product["price_usd"],
+        "owner_admin_id": update.effective_user.id,
     }
     for field in ("size", "weight_grams", "location", "category", "description",
                   "original_photo_path"):
@@ -1688,6 +1846,8 @@ def main():
             manage_product_callback, pattern=r"^delete_product:\d+$"
         )
     )
+    application.add_handler(CallbackQueryHandler(admin_add_callback, pattern=r"^admin_add$"))
+    application.add_handler(CallbackQueryHandler(admin_category_callback, pattern=r"^admin_cat:"))
     application.add_handler(
         CallbackQueryHandler(product_detail_callback, pattern=r"^product_detail:\d+$")
     )
@@ -1697,7 +1857,7 @@ def main():
     application.add_handler(
             MessageHandler(
             filters.Regex(
-                f"^(?:{BTN_LIST}|{BTN_SEARCH}|{BTN_IMPORT}|{BTN_PRICE_VIEW})$"
+                f"^(?:{BTN_LIST}|{BTN_SEARCH}|{BTN_IMPORT}|{BTN_PRICE_VIEW}|{BTN_ADD_HELP}|{BTN_ADMIN_MANAGE})$"
             ),
             menu_button,
         )

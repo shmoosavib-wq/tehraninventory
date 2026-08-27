@@ -8,6 +8,9 @@ from database import engine, get_db
 def ensure_schema():
     models.Base.metadata.create_all(bind=engine)
     columns = {column["name"] for column in inspect(engine).get_columns("products")}
+    if "owner_admin_id" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE products ADD COLUMN owner_admin_id INTEGER"))
     if "ai_description" not in columns:
         with engine.begin() as connection:
             connection.execute(

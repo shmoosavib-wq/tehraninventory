@@ -14,6 +14,7 @@ class Product(Base):
     weight_grams = Column(Float, nullable=True)
     location = Column(String, nullable=True)
     category = Column(String, nullable=True)
+    owner_admin_id = Column(Integer, nullable=True, index=True)
     
     # Telegram photo file_id (from uploaded photo)
     telegram_file_id = Column(String, nullable=True)

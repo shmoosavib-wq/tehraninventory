@@ -12,6 +12,7 @@ class ProductCreate(BaseModel):
     weight_grams: Optional[float] = None
     location: Optional[str] = None
     category: Optional[str] = None
+    owner_admin_id: Optional[int] = None
     telegram_file_id: Optional[str] = None
     original_photo_path: Optional[str] = None
     telegram_link_1: Optional[str] = None
@@ -26,6 +27,7 @@ class ProductUpdate(BaseModel):
     weight_grams: Optional[float] = None
     location: Optional[str] = None
     category: Optional[str] = None
+    owner_admin_id: Optional[int] = None
     telegram_file_id: Optional[str] = None
     original_photo_path: Optional[str] = None
     telegram_link_1: Optional[str] = None
@@ -42,6 +44,7 @@ class ProductResponse(BaseModel):
     weight_grams: Optional[float]
     location: Optional[str]
     category: Optional[str]
+    owner_admin_id: Optional[int]
     telegram_file_id: Optional[str]
     original_photo_path: Optional[str]
     telegram_link_1: Optional[str]
