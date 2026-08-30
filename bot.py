@@ -98,7 +98,8 @@ logger = logging.getLogger(__name__)
     LOCATION, DESCRIPTION, PHOTO, CONFIRM,
     SET_USD_RATE, SET_SHIPPING, SET_MULTIPLIER,
     EDIT_FIELD, EDIT_VALUE, ADD_PHOTOS, PHOTO_AI,
-) = range(16)
+    QUICK_TEXT, QUICK_PHOTOS, QUICK_CONFIRM, QUICK_EDIT,
+) = range(20)
 
 # Timeout per stage (seconds)
 STAGE_TIMEOUT = 300
@@ -106,9 +107,11 @@ STAGE_TIMEOUT = 300
 BTN_LIST = "📦 لیست محصولات"
 BTN_SEARCH = "🔍 جستجوی محصول"
 BTN_ADD = "➕ افزودن محصول"
+BTN_QUICK_ADD = "⚡ ثبت سریع محصول"
 BTN_ADD_PHOTO = "🖼 افزودن با عکس"
 BTN_ADD_HELP = "ℹ️ راهنمای ثبت محصول"
 BTN_ADMIN_MANAGE = "👥 مدیریت ادمین‌ها"
+BTN_ADMIN_REPORT = "📊 گزارش فعالیت ادمین‌ها"
 ADMIN_CATEGORIES = ["کفش", "کیف", "لباس", "ورزشی", "آرایشی بهداشتی", "اکسسوری", "دارو و سلامتی", "عطر و ادکلن"]
 BTN_SETTINGS = "⚙️ تنظیم قیمت"
 BTN_PRICE_VIEW = "💰 قیمت فعلی"
@@ -120,9 +123,10 @@ def main_menu(user_id: int) -> ReplyKeyboardMarkup:
     rows = [[BTN_LIST, BTN_SEARCH]]
     if is_admin(user_id):
         rows.append([BTN_ADD, BTN_ADD_PHOTO])
+        rows.append([BTN_QUICK_ADD])
         rows.append([BTN_ADD_HELP])
         if is_super_admin(user_id):
-            rows.append([BTN_ADMIN_MANAGE])
+            rows.append([BTN_ADMIN_MANAGE, BTN_ADMIN_REPORT])
         rows.append([BTN_IMPORT])
         rows.append([BTN_SETTINGS])
         rows.append([BTN_PRICE_VIEW])
@@ -599,6 +603,8 @@ async def import_excel_document(update: Update, context: ContextTypes.DEFAULT_TY
                     "name": str(name).strip(),
                     "price_usd": float(price),
                     "owner_admin_id": update.effective_user.id,
+        "created_by_admin_id": update.effective_user.id,
+                    "created_by_admin_id": update.effective_user.id,
                 }
                 field_map = {
                     "توضیحات دستی": "description",
@@ -778,20 +784,52 @@ async def finish_manage_photos(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
+async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_super_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
+        return
+    products = await call_api("GET", "/products")
+    config = load_admin_config()
+    ids = sorted(set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(x) for x in config if str(x).isdigit()})
+    lines = ["📊 گزارش فعالیت ادمین‌ها", ""]
+    for uid in ids:
+        created = sum(1 for p in products if p.get("created_by_admin_id") == uid)
+        owned = sum(1 for p in products if p.get("owner_admin_id") == uid)
+        lines.append(f"🆔 {uid} | ثبت محصول: {created} | مالک فعلی: {owned}")
+    lines.append(f"\n📦 مجموع محصولات: {len(products)}")
+    await update.message.reply_text("\n".join(lines), reply_markup=main_menu(update.effective_user.id))
+
 async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
         await update.message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
         return
     config = load_admin_config()
+    all_admin_ids = set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(uid) for uid in config if str(uid).isdigit()}
     lines = ["👥 مدیریت ادمین‌ها", "", "ادمین‌های فعلی:"]
-    if config:
-        for uid, info in config.items():
-            cats = ", ".join(info.get("categories", [])) or "بدون دسته"
-            lines.append(f"🆔 {uid}\n   🏷️ {cats}")
-    else:
-        lines.append("هنوز ادمینی ثبت نشده است.")
-    lines.append("\nبرای افزودن ادمین جدید، دکمه زیر را بزنید.")
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ افزودن ادمین", callback_data="admin_add")]]))
+    if all_admin_ids:
+        for uid in sorted(all_admin_ids):
+            info = config.get(str(uid), {})
+            cats = ", ".join(info.get("categories", [])) or "همه دسته‌ها"
+            role = "سوپرادمین" if uid in SUPER_ADMIN_IDS else "ادمین"
+            lines.append(f"🆔 {uid} | {role}\n   🏷️ {cats}")
+    lines.append("\nبرای افزودن ادمین جدید یا تغییر دسته‌ها از دکمه‌ها استفاده کنید.")
+    buttons = [[InlineKeyboardButton("✏️ تغییر دسته‌ها برای " + str(uid), callback_data=f"admin_edit:{uid}")] for uid in sorted(all_admin_ids) if uid not in SUPER_ADMIN_IDS]
+    buttons.append([InlineKeyboardButton("➕ افزودن ادمین", callback_data="admin_add")])
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
+async def admin_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_super_admin(query.from_user.id):
+        return
+    admin_id = int(query.data.split(":", 1)[1])
+    config = load_admin_config()
+    context.user_data["new_admin_id"] = admin_id
+    context.user_data["new_admin_categories"] = list(config.get(str(admin_id), {}).get("categories", []))
+    selected = set(context.user_data["new_admin_categories"])
+    buttons = [[InlineKeyboardButton(("✅ " if c in selected else "▫️ ") + c, callback_data="admin_cat:" + c)] for c in ADMIN_CATEGORIES]
+    buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
+    await query.message.reply_text("🏷️ دسته‌های مجاز را ویرایش کنید:", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def admin_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -821,25 +859,6 @@ async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_
     buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
 
-    text = (update.message.text or "").strip()
-    if text == BTN_LIST:
-        await cmd_list(update, context)
-    elif text == BTN_SEARCH:
-        context.user_data["awaiting_search"] = True
-        await update.message.reply_text(
-            "🔍 نام، دسته یا ویژگی محصول را بنویسید:",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-    elif text == BTN_IMPORT:
-        await import_excel_start(update, context)
-    elif text == BTN_PRICE_VIEW:
-        await cmd_price_settings(update, context)
-    elif text == BTN_ADD_HELP:
-        await add_help(update, context)
-    elif text == BTN_ADMIN_MANAGE:
-        await admin_manage_start(update, context)
-
-
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if context.user_data.pop("awaiting_new_admin_id", False):
@@ -862,6 +881,7 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == BTN_PRICE_VIEW: await cmd_price_settings(update, context)
     elif text == BTN_ADD_HELP: await add_help(update, context)
     elif text == BTN_ADMIN_MANAGE: await admin_manage_start(update, context)
+    elif text == BTN_ADMIN_REPORT: await admin_report(update, context)
 
 async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.pop("awaiting_search", False):
@@ -1378,6 +1398,8 @@ async def add_confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "name": product["name"],
         "price_usd": product["price_usd"],
         "owner_admin_id": update.effective_user.id,
+        "created_by_admin_id": update.effective_user.id,
+                    "created_by_admin_id": update.effective_user.id,
     }
     for field in ("size", "weight_grams", "location", "category", "description",
                   "original_photo_path"):
@@ -1697,6 +1719,118 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_product_page(update, context, 0)
 
 
+# ── Experimental quick product entry ─────────────────────────
+def parse_quick_product(text: str) -> dict:
+    """Parse labelled multi-line or free-form one-line product text."""
+    raw = text.strip()
+    normalized = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+    lines = [x.strip() for x in normalized.splitlines() if x.strip()]
+    def find(pattern):
+        m = re.search(pattern, normalized, re.I | re.M)
+        return (m.group(1) or "").strip(" \t:：-،,؛") if m else None
+    price = find(r"(?:قیمت(?: خرید)?|price)\s*[:：-]?\s*([0-9]+(?:[.,][0-9]+)?)")
+    if not price:
+        m = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*(?:دلار|دالر|usd|\$)", normalized, re.I); price = m.group(1) if m else None
+    weight = find(r"(?:وزن|weight)\s*[:：-]?\s*([0-9]+(?:[.,][0-9]+)?)")
+    if not weight:
+        m = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*(?:گرم|g)\b", normalized, re.I); weight = m.group(1) if m else None
+    size = find(r"(?:سایز|سایس|اندازه|size)\s*[:：-]?\s*((?:(?:US|EU|UK)\s*)?[0-9]+(?:[.,][0-9]+)?)")
+    location = find(r"(?:موقعیت|لوکیشن|location)\s*[:：-]?\s*([^\n,؛]+)")
+    if not location:
+        m = re.search(r"\b(تهران|کانادا|ایران|آمریکا|ترکیه|دبی|canada|iran|usa|turkey|dubai)\b", normalized, re.I)
+        location = m.group(1) if m else "تهران"
+    category = find(r"(?:دسته|دسته‌بندی|category)\s*[:：-]?\s*([^\n,؛]+)")
+    description = find(r"(?:توضیحات|توضیح|شرح|description)\s*[:：-]?\s*(.+)$")
+    name = find(r"(?:نام|محصول|name)\s*[:：-]?\s*(.+?)(?=\s+(?:قیمت|وزن|سایز|دسته|موقعیت|توضیحات)\s*[:：-]|\s+[0-9]+\s*(?:دلار|\$)|$)")
+    if not name:
+        name = lines[0] if lines else ""
+        name = re.split(r"\s+(?=(?:سایز|سایس|اندازه|قیمت|وزن|موقعیت|دسته|توضیحات)\b|[0-9]+(?:[.,][0-9]+)?\s*(?:دلار|دالر|usd|\$|گرم|g)\b)", name, maxsplit=1, flags=re.I)[0].strip(" -،,؛:")
+    haystack = f"{name} {description or ''} {normalized}".lower()
+    if not category:
+        rules = [("عطر و ادکلن", ("عطر","ادکلن","perfume","cologne","fragrance","رایحه")), ("دارو و سلامتی", ("قرص","دارو","ویتامین","مکمل","مسکن","tablet","vitamin")), ("کفش", ("کفش","کتونی","بوت","صندل","sneaker","shoe")), ("کیف", ("کیف","کوله","bag","backpack")), ("لباس", ("لباس","پیراهن","شلوار","کاپشن","مانتو","dress","shirt","jacket")), ("اکسسوری", ("اکسسوری","ساعت","انگشتر","گردنبند","دستبند","watch")), ("ورزشی", ("ورزشی","فوتبال","بدنسازی","gym","sport")), ("آرایشی بهداشتی", ("آرایشی","بهداشتی","کرم","شامپو","cosmetic"))]
+        category = next((label for label, words in rules if any(w in haystack for w in words)), "سایر")
+    if not description:
+        cleaned = normalized
+        if name: cleaned = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", " ", cleaned, flags=re.I)
+        cleaned = re.sub(r"(?:سایز|سایس|اندازه)\s*[0-9]+(?:[.,][0-9]+)?", " ", cleaned, flags=re.I)
+        cleaned = re.sub(r"[0-9]+(?:[.,][0-9]+)?\s*(?:دلار|دالر|usd|\$|گرم|g)\b", " ", cleaned, flags=re.I)
+        cleaned = re.sub(r"\b(?:قیمت|خرید|وزن|دسته|دسته‌بندی|موقعیت|لوکیشن|توضیحات|سایز|سایس|اندازه|size)\s*[:：-]?", " ", cleaned, flags=re.I)
+        for value in (size, category, location):
+            if value: cleaned = re.sub(r"(?<!\w)" + re.escape(value) + r"(?!\w)", " ", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -،,؛:")
+        description = cleaned or ""
+    return {"name": name, "price_usd": float(price.replace(",", ".")) if price else None, "weight_grams": float(weight.replace(",", ".")) if weight else None, "size": size, "category": category, "location": location, "description": description}
+async def quick_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return ConversationHandler.END
+    context.user_data.clear(); context.user_data["product"] = {"photo_paths": []}
+    await update.message.reply_text("⚡ ثبت سریع محصول\nلطفاً اطلاعات را به همین ترتیب و ترجیحاً هر مورد در یک خط بفرستید:\nنام محصول\nقیمت به دلار\nوزن به گرم\nسایز (اختیاری)\nموقعیت (اختیاری؛ پیش‌فرض تهران)\nتوضیحات\nدسته‌بندی (اختیاری)\n\nمتن پیوسته هم پشتیبانی می‌شود، اما برای تشخیص دقیق‌تر Enter بزنید.", reply_markup=cancel_keyboard())
+    return QUICK_TEXT
+
+async def quick_add_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_text = update.message.text or ""
+    price_count = len(re.findall(r"[0-9۰-۹]+(?:[.,][0-9۰-۹]+)?\s*(?:دلار|دالر|usd|\$)", raw_text, re.I))
+    if price_count > 1:
+        await update.message.reply_text("⚠️ به نظر می‌رسد اطلاعات چند محصول در یک پیام است. لطفاً هر محصول را جداگانه ارسال کنید.", reply_markup=cancel_keyboard())
+        return QUICK_TEXT
+    product = context.user_data["product"]; product.update({k:v for k,v in parse_quick_product(update.message.text).items() if v not in (None, "")})
+    if not product.get("price_usd"):
+        await update.message.reply_text("قیمت دلار پیدا نشد؛ دوباره متن را همراه قیمت بفرستید.", reply_markup=cancel_keyboard()); return QUICK_TEXT
+    await update.message.reply_text("✅ اطلاعات خوانده شد. حالا یک تا سه عکس بفرستید؛ اگر عکس ندارید دکمه اتمام را بزنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ اتمام عکس‌ها", callback_data="quick_finish")],[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]))
+    return QUICK_PHOTOS
+
+async def quick_add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    paths=context.user_data["product"].setdefault("photo_paths",[])
+    if len(paths)>=3: return QUICK_PHOTOS
+    filename=f"quick_product_{update.effective_user.id}_{len(paths)+1}.jpg"; saved=await download_photo(update,filename)
+    if saved: paths.append(saved); context.user_data["product"]["original_photo_path"]="|".join("photos/"+os.path.basename(p) for p in paths)
+    await update.message.reply_text(f"✅ عکس {len(paths)} دریافت شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ اتمام عکس‌ها", callback_data="quick_finish")],[InlineKeyboardButton("❌ لغو", callback_data="cancel")]])); return QUICK_PHOTOS
+
+async def quick_add_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer(); p=context.user_data["product"]; missing=[]
+    if not p.get("name"): missing.append("نام")
+    if not p.get("price_usd"): missing.append("قیمت")
+    if missing: await q.message.reply_text("موارد ناقص: "+"، ".join(missing)); return QUICK_TEXT
+    preview=(f"📦 عنوان: {p['name']}\n💰 قیمت خرید: ${p['price_usd']}\n💵 قیمت نهایی: {toman(calculate_toman(p['price_usd'], p.get('weight_grams')))}\n⚖️ وزن: {p.get('weight_grams') or '-'} گرم\n📏 سایز: {p.get('size') or '-'}\n🏷️ دسته تشخیص‌داده‌شده: {p.get('category') or 'سایر'}\n📍 موقعیت: {p.get('location') or '-'}\n📝 توضیحات: {p.get('description') or '-'}")
+    context.user_data["quick_preview"] = p
+    await q.message.reply_text(preview, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ثبت محصول", callback_data="quick_save"), InlineKeyboardButton("✏️ ویرایش", callback_data="quick_edit")],[InlineKeyboardButton("❌ لغو", callback_data="cancel")]])); return QUICK_CONFIRM
+
+async def quick_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    fields = [("name", "عنوان"), ("price_usd", "قیمت دلار"), ("weight_grams", "وزن"), ("size", "سایز"), ("category", "دسته‌بندی"), ("location", "موقعیت"), ("description", "توضیحات")]
+    keyboard = [[InlineKeyboardButton(label, callback_data=f"quick_edit_field:{field}")] for field, label in fields]
+    keyboard.append([InlineKeyboardButton("↩️ بازگشت", callback_data="quick_back")])
+    await q.message.reply_text("کدام بخش ویرایش شود؟", reply_markup=InlineKeyboardMarkup(keyboard))
+    return QUICK_EDIT
+
+async def quick_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    field = q.data.split(":", 1)[1]
+    context.user_data["quick_edit_field"] = field
+    await q.message.reply_text("مقدار جدید را بفرستید:", reply_markup=cancel_keyboard())
+    return QUICK_EDIT
+
+async def quick_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    field = context.user_data.pop("quick_edit_field", None)
+    if not field:
+        return QUICK_EDIT
+    value = update.message.text.strip()
+    if field in ("price_usd", "weight_grams"):
+        try:
+            value = float(value.replace(",", ".").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")))
+        except ValueError:
+            await update.message.reply_text("لطفاً عدد معتبر بفرستید.")
+            context.user_data["quick_edit_field"] = field
+            return QUICK_EDIT
+    context.user_data["product"][field] = value
+    await update.message.reply_text("✅ ویرایش شد. برای ویرایش بخش دیگر دکمه ویرایش را بزنید یا ثبت کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ثبت محصول", callback_data="quick_save")],[InlineKeyboardButton("✏️ ویرایش بخش دیگر", callback_data="quick_edit")],[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]))
+    return QUICK_CONFIRM
+async def quick_add_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer(); p=context.user_data.pop("quick_preview", context.user_data.get("product",{})); payload={k:v for k,v in p.items() if k not in ("photo_paths",) and v not in (None, "")}; payload["owner_admin_id"]=q.from_user.id; payload["created_by_admin_id"]=q.from_user.id
+    try: result=await call_api("POST","/products",data=payload); await q.message.reply_text(f"✅ محصول ثبت شد. ID: {result['id']}",reply_markup=main_menu(q.from_user.id))
+    except Exception: await q.message.reply_text("❌ ثبت محصول ناموفق بود.",reply_markup=main_menu(q.from_user.id))
+    context.user_data.clear(); return ConversationHandler.END
 # ── Main ─────────────────────────────────────────────────────
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1768,9 +1902,14 @@ def main():
         entry_points=[
             CommandHandler("add", add_start),
             MessageHandler(filters.Regex(f"^{BTN_ADD}$"), add_start),
+            MessageHandler(filters.Regex(f"^{BTN_QUICK_ADD}$"), quick_add_start),
             MessageHandler(filters.Regex(f"^{BTN_ADD_PHOTO}$"), add_photo_ai_start),
         ],
         states={
+            QUICK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, quick_add_text), CallbackQueryHandler(cancel, pattern="^cancel$")],
+            QUICK_PHOTOS: [MessageHandler(filters.PHOTO, quick_add_photo), CallbackQueryHandler(quick_add_finish, pattern="^quick_finish$"), CallbackQueryHandler(cancel, pattern="^cancel$")],
+            QUICK_CONFIRM: [CallbackQueryHandler(quick_add_save, pattern="^quick_save$"), CallbackQueryHandler(quick_edit_start, pattern="^quick_edit$"), CallbackQueryHandler(cancel, pattern="^cancel$")],
+            QUICK_EDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, quick_edit_value), CallbackQueryHandler(quick_edit_field, pattern="^quick_edit_field:"), CallbackQueryHandler(quick_edit_start, pattern="^quick_edit$"), CallbackQueryHandler(quick_add_finish, pattern="^quick_back$"), CallbackQueryHandler(cancel, pattern="^cancel$")],
             PHOTO_AI: [
                 MessageHandler(filters.PHOTO, add_photo_ai_receive),
                 MessageHandler(
@@ -1829,6 +1968,13 @@ def main():
         ],
         conversation_timeout=STAGE_TIMEOUT,
     )
+
+    # Priority handlers: these must work even when another conversation is active.
+    application.add_handler(CallbackQueryHandler(cancel, pattern=r"^cancel$"), group=-1)
+    application.add_handler(
+        MessageHandler(filters.Regex(f"^(?:{BTN_ADMIN_MANAGE}|{BTN_ADMIN_REPORT})$"), menu_button),
+        group=-1,
+    )
     application.add_handler(conv_handler)
 
     # Regular commands
@@ -1846,6 +1992,7 @@ def main():
             manage_product_callback, pattern=r"^delete_product:\d+$"
         )
     )
+    application.add_handler(CallbackQueryHandler(admin_edit_callback, pattern=r"^admin_edit:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_add_callback, pattern=r"^admin_add$"))
     application.add_handler(CallbackQueryHandler(admin_category_callback, pattern=r"^admin_cat:"))
     application.add_handler(
@@ -1857,7 +2004,7 @@ def main():
     application.add_handler(
             MessageHandler(
             filters.Regex(
-                f"^(?:{BTN_LIST}|{BTN_SEARCH}|{BTN_IMPORT}|{BTN_PRICE_VIEW}|{BTN_ADD_HELP}|{BTN_ADMIN_MANAGE})$"
+                f"^(?:{BTN_LIST}|{BTN_SEARCH}|{BTN_IMPORT}|{BTN_PRICE_VIEW}|{BTN_ADD_HELP})$"
             ),
             menu_button,
         )

@@ -15,6 +15,7 @@ class Product(Base):
     location = Column(String, nullable=True)
     category = Column(String, nullable=True)
     owner_admin_id = Column(Integer, nullable=True, index=True)
+    created_by_admin_id = Column(Integer, nullable=True, index=True)
     
     # Telegram photo file_id (from uploaded photo)
     telegram_file_id = Column(String, nullable=True)
