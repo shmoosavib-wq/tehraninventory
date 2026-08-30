@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import FileResponse
+from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from typing import List
@@ -24,10 +26,18 @@ def ensure_schema():
 ensure_schema()
 
 app = FastAPI(title="Tehran Inventory API", version="1.0.0")
+RAILWAY_PHOTO_DIR = Path("/data/photos")
 
 @app.get("/")
 def read_root():
     return {"message": "Tehran Inventory API is running"}
+
+@app.get("/media/{filename}")
+def get_media(filename: str):
+    photo = RAILWAY_PHOTO_DIR / Path(filename).name
+    if not photo.is_file():
+        raise HTTPException(status_code=404, detail="Media not found")
+    return FileResponse(photo)
 
 @app.get("/products", response_model=List[schemas.ProductResponse])
 def get_products(db: Session = Depends(get_db)):
