@@ -1,6 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
 from fastapi.responses import FileResponse
 from pathlib import Path
+import os
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from typing import List
@@ -27,6 +28,7 @@ ensure_schema()
 
 app = FastAPI(title="Tehran Inventory API", version="1.0.0")
 RAILWAY_PHOTO_DIR = Path("/data/photos")
+RAILWAY_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
 @app.get("/")
 def read_root():
@@ -38,6 +40,20 @@ def get_media(filename: str):
     if not photo.is_file():
         raise HTTPException(status_code=404, detail="Media not found")
     return FileResponse(photo)
+
+@app.post("/media/upload")
+async def upload_media(file: UploadFile = File(...), x_media_token: str | None = Header(default=None)):
+    expected = os.environ.get("MEDIA_UPLOAD_TOKEN")
+    if not expected or x_media_token != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    filename = Path(file.filename or "").name
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    target = RAILWAY_PHOTO_DIR / filename
+    with target.open("wb") as output:
+        while chunk := await file.read(1024 * 1024):
+            output.write(chunk)
+    return {"filename": filename, "path": f"photos/{filename}"}
 
 @app.get("/products", response_model=List[schemas.ProductResponse])
 def get_products(db: Session = Depends(get_db)):

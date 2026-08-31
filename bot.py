@@ -37,6 +37,7 @@ load_dotenv()
 
 # ── Configuration ─────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
+MEDIA_UPLOAD_TOKEN = os.environ.get("MEDIA_UPLOAD_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "https://api.gapgpt.app/v1"
@@ -431,6 +432,18 @@ async def download_photo(update: Update, filename: str) -> str | None:
     file = await photo.get_file()
     filepath = os.path.join(PHOTOS_DIR, filename)
     await file.download_to_drive(filepath)
+    if MEDIA_UPLOAD_TOKEN and not API_BASE_URL.startswith(("http://127.0.0.1", "http://localhost")):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                with open(filepath, "rb") as image:
+                    response = await client.post(
+                        API_BASE_URL.rstrip("/") + "/media/upload",
+                        headers={"X-Media-Token": MEDIA_UPLOAD_TOKEN},
+                        files={"file": (filename, image, "image/jpeg")},
+                    )
+                response.raise_for_status()
+        except Exception:
+            logger.exception("Could not mirror photo to API media storage")
     return filepath
 
 
