@@ -12,6 +12,7 @@ import base64
 import json
 from difflib import SequenceMatcher
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
@@ -1592,7 +1593,7 @@ async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_
         f"📝 توضیحات:\n{clean_product_description(product)}"
     )
     raw_paths = product.get("original_photo_path") or ""
-    existing_paths = []
+    media_sources = []
     for photo_path in raw_paths.split("|"):
         if not photo_path:
             continue
@@ -1600,19 +1601,23 @@ async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_
             os.path.dirname(os.path.abspath(__file__)), photo_path
         )
         if os.path.exists(full):
-            existing_paths.append(full)
-    if existing_paths:
+            media_sources.append(("file", full))
+        else:
+            filename = os.path.basename(photo_path)
+            media_sources.append(("url", f"{API_BASE_URL.rstrip('/')}/media/{quote(filename, safe='')}"))
+    if media_sources:
         handles = []
         try:
-            handles = [open(path, "rb") for path in existing_paths]
-            media = [
-                InputMediaPhoto(
+            media = []
+            for source_type, source in media_sources:
+                handle = open(source, "rb") if source_type == "file" else source
+                if source_type == "file":
+                    handles.append(handle)
+                media.append(InputMediaPhoto(
                     media=handle,
-                    caption=text if index == 0 else None,
-                    parse_mode="Markdown" if index == 0 else None,
-                )
-                for index, handle in enumerate(handles)
-            ]
+                    caption=text if not media else None,
+                    parse_mode="Markdown" if not media else None,
+                ))
             await query.message.reply_media_group(media=media)
         finally:
             for handle in handles:
