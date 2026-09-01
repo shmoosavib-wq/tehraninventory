@@ -717,12 +717,15 @@ async def manage_product_callback(update: Update, context: ContextTypes.DEFAULT_
     elif action == "photo_product":
         context.user_data["photo_product_id"] = product_id
         context.user_data["photo_paths"] = []
+        existing_paths = [p for p in (current_product.get("original_photo_path") or "").split("|") if p]
+        keyboard = [[InlineKeyboardButton(f"🗑 حذف عکس {i + 1}", callback_data=f"remove_photo:{product_id}:{i}")] for i, _ in enumerate(existing_paths)]
+        keyboard.extend([
+            [InlineKeyboardButton("✅ اتمام عکس‌ها", callback_data="finish_manage_photos")],
+            [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+        ])
         await query.message.reply_text(
-            "📷 عکس‌های محصول را یکی‌یکی بفرستید، سپس «اتمام عکس‌ها» را بزنید.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ اتمام عکس‌ها", callback_data="finish_manage_photos")],
-                [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
-            ]),
+            "📷 عکس جدید بفرستید یا یکی از عکس‌های موجود را حذف کنید.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return ADD_PHOTOS
 
@@ -751,16 +754,34 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     value = update.message.text.strip()
     try:
         if field in ("price_usd", "weight_grams"):
-            value = float(value.replace(",", ""))
-        await call_api("PUT", f"/products/{product_id}", data={field: value})
-        await update.message.reply_text(
-            "✅ محصول به‌روزرسانی شد.", reply_markup=main_menu(update.effective_user.id)
-        )
-    except (ValueError, httpx.HTTPError):
+            value = float(value.replace(",", "."))
+    except ValueError:
         await update.message.reply_text("❌ مقدار واردشده معتبر نیست.")
         return EDIT_VALUE
-    context.user_data.pop("editing_product_id", None)
-    context.user_data.pop("editing_field", None)
+    product = await call_api("GET", f"/products/{product_id}")
+    product[field] = value
+    context.user_data["pending_edit_value"] = value
+    await update.message.reply_text(
+        summary_text(product) + "\n\nآیا این تغییر ذخیره شود؟",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تأیید ذخیره", callback_data="confirm_edit")],
+            [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+        ]),
+    )
+    return EDIT_VALUE
+
+
+async def confirm_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    product_id = context.user_data.pop("editing_product_id", None)
+    field = context.user_data.pop("editing_field", None)
+    value = context.user_data.pop("pending_edit_value", None)
+    if not product_id or not field or value is None:
+        await query.message.reply_text("❌ ویرایش منقضی شده است.")
+        return ConversationHandler.END
+    await call_api("PUT", f"/products/{product_id}", data={field: value})
+    await query.message.reply_text("✅ تغییر با موفقیت ذخیره شد.", reply_markup=main_menu(query.from_user.id))
     return ConversationHandler.END
 
 
@@ -797,6 +818,47 @@ async def finish_manage_photos(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.message.reply_text("✅ عکس‌ها به محصول اضافه شدند.")
     return ConversationHandler.END
 
+
+async def remove_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    _, product_id_text, index_text = query.data.split(":")
+    product_id, index = int(product_id_text), int(index_text)
+    product = await call_api("GET", f"/products/{product_id}")
+    paths = [p for p in (product.get("original_photo_path") or "").split("|") if p]
+    if index < 0 or index >= len(paths):
+        await query.message.reply_text("❌ این عکس پیدا نشد.")
+        return
+    paths.pop(index)
+    await call_api(
+        "PUT",
+        f"/products/{product_id}",
+        data={"original_photo_path": "|".join(paths)},
+    )
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🗑 حذف عکس {i + 1}",
+            callback_data=f"remove_photo:{product_id}:{i}",
+        )]
+        for i, _path in enumerate(paths)
+    ]
+    keyboard.extend([
+        [InlineKeyboardButton(
+            "📷 افزودن عکس جدید",
+            callback_data=f"photo_product:{product_id}",
+        )],
+        [InlineKeyboardButton(
+            "✅ اتمام عکس‌ها",
+            callback_data="finish_manage_photos",
+        )],
+        [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+    ])
+    await query.message.reply_text(
+        "✅ عکس حذف شد. عملیات بعدی را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
@@ -1453,6 +1515,10 @@ async def add_confirm_redo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
+        handled_id = context.chat_data.get("last_cancel_callback_id")
+        if handled_id == query.id:
+            return ConversationHandler.END
+        context.chat_data["last_cancel_callback_id"] = query.id
         await query.answer()
     context.user_data.clear()
     msg = update.effective_message
@@ -1896,6 +1962,7 @@ def main():
             ],
             EDIT_VALUE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value),
+                CallbackQueryHandler(confirm_edit_callback, pattern="^confirm_edit$"),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
             ADD_PHOTOS: [
@@ -2010,6 +2077,8 @@ def main():
             manage_product_callback, pattern=r"^delete_product:\d+$"
         )
     )
+    application.add_handler(CallbackQueryHandler(remove_photo_callback, pattern=r"^remove_photo:\d+:\d+$"))
+    application.add_handler(CallbackQueryHandler(confirm_edit_callback, pattern=r"^confirm_edit$"))
     application.add_handler(CallbackQueryHandler(admin_edit_callback, pattern=r"^admin_edit:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_add_callback, pattern=r"^admin_add$"))
     application.add_handler(CallbackQueryHandler(admin_category_callback, pattern=r"^admin_cat:"))
