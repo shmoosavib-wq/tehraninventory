@@ -1,4 +1,4 @@
-﻿from pydantic import BaseModel
+from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 
@@ -13,6 +13,7 @@ class ProductCreate(BaseModel):
     category: Optional[str] = None
     owner_admin_id: Optional[int] = None
     created_by_admin_id: Optional[int] = None
+    created_by_admin_username: Optional[str] = None
     telegram_file_id: Optional[str] = None
     original_photo_path: Optional[str] = None
     telegram_link_1: Optional[str] = None
@@ -29,6 +30,7 @@ class ProductUpdate(BaseModel):
     category: Optional[str] = None
     owner_admin_id: Optional[int] = None
     created_by_admin_id: Optional[int] = None
+    created_by_admin_username: Optional[str] = None
     telegram_file_id: Optional[str] = None
     original_photo_path: Optional[str] = None
     telegram_link_1: Optional[str] = None
@@ -46,6 +48,7 @@ class ProductResponse(BaseModel):
     category: Optional[str] = None
     owner_admin_id: Optional[int] = None
     created_by_admin_id: Optional[int] = None
+    created_by_admin_username: Optional[str] = None
     telegram_file_id: Optional[str] = None
     original_photo_path: Optional[str] = None
     telegram_link_1: Optional[str] = None
@@ -53,5 +56,27 @@ class ProductResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
+    class Config:
+        from_attributes = True
+
+
+class ActivityEventCreate(BaseModel):
+    user_id: Optional[int] = None
+    event_type: str
+    product_id: Optional[int] = None
+    search_text: Optional[str] = None
+    category: Optional[str] = None
+    price_min: Optional[float] = None
+    price_max: Optional[float] = None
+    metadata: Optional[dict] = None
+
+class ActivityEventResponse(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    event_type: str
+    product_id: Optional[int] = None
+    search_text: Optional[str] = None
+    category: Optional[str] = None
+    created_at: datetime
     class Config:
         from_attributes = True

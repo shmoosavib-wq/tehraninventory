@@ -6,6 +6,7 @@ Tehran Inventory Bot
 """
 
 import os
+import asyncio
 import logging
 import re
 import base64
@@ -341,6 +342,22 @@ async def call_api(
         return resp.json()
 
 
+async def track_event(event_type: str, user_id: int | None = None, product_id: int | None = None, search_text: str | None = None, category: str | None = None, price_min: float | None = None, price_max: float | None = None, metadata: dict | None = None):
+    payload = {"event_type": event_type, "user_id": user_id, "product_id": product_id, "search_text": search_text, "category": category, "price_min": price_min, "price_max": price_max, "metadata": metadata}
+    payload = {k: v for k, v in payload.items() if v is not None}
+    try:
+        await call_api("POST", "/analytics/events", data=payload)
+    except Exception:
+        logger.debug("Analytics event failed: %s", event_type, exc_info=True)
+
+
+def fire_event(*args, **kwargs):
+    try:
+        return asyncio.create_task(track_event(*args, **kwargs))
+    except RuntimeError:
+        return None
+
+
 async def generate_ai_description(product: dict) -> str:
     """Generate a short Persian sales description with one inexpensive API call."""
     if not OPENAI_API_KEY:
@@ -457,6 +474,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"سطح دسترسی: {admin_status}\n\n"
         "یکی از گزینه‌های زیر را انتخاب کنید:"
     )
+    fire_event("user_started", user_id=user.id, metadata={"is_admin": is_admin(user.id)})
     await update.message.reply_text(text, reply_markup=main_menu(user.id))
 
 
@@ -618,7 +636,7 @@ async def import_excel_document(update: Update, context: ContextTypes.DEFAULT_TY
                     "price_usd": float(price),
                     "owner_admin_id": update.effective_user.id,
         "created_by_admin_id": update.effective_user.id,
-                    "created_by_admin_id": update.effective_user.id,
+        "created_by_admin_username": update.effective_user.username or update.effective_user.full_name,
                 }
                 field_map = {
                     "توضیحات دستی": "description",
@@ -1064,8 +1082,10 @@ async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     ]
     if not results:
+        fire_event("search_no_result", user_id=update.effective_user.id, search_text=keyword, price_max=max_price, metadata={"result_count": 0})
         await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
     else:
+        fire_event("search", user_id=update.effective_user.id, search_text=keyword, price_max=max_price, metadata={"result_count": len(results)})
         await update.message.reply_text(
             f"🔍 نتایج جستجو برای «{keyword}» ({len(results)} مورد):"
         )
@@ -1484,6 +1504,7 @@ async def add_confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         result = await call_api("POST", "/products", data=payload)
+        fire_event("product_created", user_id=update.effective_user.id, product_id=result.get("id"), category=payload.get("category"), metadata={"source": "manual_add", "admin_username": update.effective_user.username or update.effective_user.full_name})
         text = (
             f"✅ محصول با موفقیت ثبت شد!\n\n"
             f"ID: {result['id']}\n"
@@ -1647,6 +1668,7 @@ async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     product_id = int(query.data.split(":", 1)[1])
     product = await call_api("GET", f"/products/{product_id}")
+    fire_event("view_product", user_id=query.from_user.id, product_id=product_id, category=product.get("category"), metadata={"source": "product_detail"})
     final_price = calculate_toman(product.get("price_usd", 0), product.get("weight_grams"))
     text = (
         f"📦 {product['name']}\n"
@@ -1911,8 +1933,8 @@ async def quick_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ ویرایش شد. برای ویرایش بخش دیگر دکمه ویرایش را بزنید یا ثبت کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ثبت محصول", callback_data="quick_save")],[InlineKeyboardButton("✏️ ویرایش بخش دیگر", callback_data="quick_edit")],[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]))
     return QUICK_CONFIRM
 async def quick_add_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; await q.answer(); p=context.user_data.pop("quick_preview", context.user_data.get("product",{})); payload={k:v for k,v in p.items() if k not in ("photo_paths",) and v not in (None, "")}; payload["owner_admin_id"]=q.from_user.id; payload["created_by_admin_id"]=q.from_user.id
-    try: result=await call_api("POST","/products",data=payload); await q.message.reply_text(f"✅ محصول ثبت شد. ID: {result['id']}",reply_markup=main_menu(q.from_user.id))
+    q=update.callback_query; await q.answer(); p=context.user_data.pop("quick_preview", context.user_data.get("product",{})); payload={k:v for k,v in p.items() if k not in ("photo_paths",) and v not in (None, "")}; payload["owner_admin_id"]=q.from_user.id; payload["created_by_admin_id"]=q.from_user.id; payload["created_by_admin_username"]=q.from_user.username or q.from_user.full_name
+    try: result=await call_api("POST","/products",data=payload); fire_event("product_created", user_id=q.from_user.id, product_id=result.get("id"), category=payload.get("category"), metadata={"source": "quick_add", "admin_username": q.from_user.username or q.from_user.full_name}); await q.message.reply_text(f"✅ محصول ثبت شد. ID: {result['id']}",reply_markup=main_menu(q.from_user.id))
     except Exception: await q.message.reply_text("❌ ثبت محصول ناموفق بود.",reply_markup=main_menu(q.from_user.id))
     context.user_data.clear(); return ConversationHandler.END
 # ── Main ─────────────────────────────────────────────────────

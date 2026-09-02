@@ -16,6 +16,7 @@ class Product(Base):
     category = Column(String, nullable=True)
     owner_admin_id = Column(Integer, nullable=True, index=True)
     created_by_admin_id = Column(Integer, nullable=True, index=True)
+    created_by_admin_username = Column(String, nullable=True)
     
     # Telegram photo file_id (from uploaded photo)
     telegram_file_id = Column(String, nullable=True)
@@ -29,3 +30,17 @@ class Product(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class ActivityEvent(Base):
+    __tablename__ = "activity_events"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    event_type = Column(String(40), nullable=False, index=True)
+    product_id = Column(Integer, nullable=True, index=True)
+    search_text = Column(String(255), nullable=True, index=True)
+    category = Column(String(100), nullable=True, index=True)
+    price_min = Column(Float, nullable=True)
+    price_max = Column(Float, nullable=True)
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
