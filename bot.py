@@ -886,16 +886,26 @@ async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_admin_config()
     ids = sorted(set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(x) for x in config if str(x).isdigit()})
     lines = ["📊 گزارش فعالیت ادمین‌ها", ""]
+    usernames = {
+        int(uid): info.get("username")
+        for uid, info in config.items()
+        if str(uid).strip().isdigit() and info.get("username")
+    }
+    for product in products:
+        uid = product.get("created_by_admin_id")
+        if uid and not usernames.get(uid) and product.get("created_by_admin_username"):
+            usernames[uid] = product.get("created_by_admin_username")
     for uid in ids:
         created = sum(1 for p in products if p.get("created_by_admin_id") == uid)
         owned = sum(1 for p in products if p.get("owner_admin_id") == uid)
-        lines.append(f"🆔 {uid} | ثبت محصول: {created} | مالک فعلی: {owned}")
+        label = f"@{usernames[uid]}" if usernames.get(uid) else "بدون username"
+        lines.append(f"👤 {label}\n🔢 Telegram ID: {uid}\n📦 ثبت محصول: {created} | مالک فعلی: {owned}")
     lines.append(f"\n📦 مجموع محصولات: {len(products)}")
     await update.message.reply_text("\n".join(lines), reply_markup=main_menu(update.effective_user.id))
 
 async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
+        await update.effective_message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
         return
     config = load_admin_config()
     all_admin_ids = set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(uid) for uid in config if str(uid).isdigit()}
@@ -905,11 +915,16 @@ async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
             info = config.get(str(uid), {})
             cats = ", ".join(info.get("categories", [])) or "همه دسته‌ها"
             role = "سوپرادمین" if uid in SUPER_ADMIN_IDS else "ادمین"
-            lines.append(f"🆔 {uid} | {role}\n   🏷️ {cats}")
+            username = info.get("username") or next((p.get("created_by_admin_username") for p in [] if p.get("created_by_admin_id") == uid), None)
+            label = f"@{username}" if username else "بدون username"
+            lines.append(f"👤 {label} | {role}\n🔢 Telegram ID: {uid}\n🏷️ دسته‌ها: {cats}")
     lines.append("\nبرای افزودن ادمین جدید یا تغییر دسته‌ها از دکمه‌ها استفاده کنید.")
-    buttons = [[InlineKeyboardButton("✏️ تغییر دسته‌ها برای " + str(uid), callback_data=f"admin_edit:{uid}")] for uid in sorted(all_admin_ids) if uid not in SUPER_ADMIN_IDS]
+    buttons = []
+    for uid in sorted(all_admin_ids):
+        label = f"@{config.get(str(uid), {}).get('username')}" if config.get(str(uid), {}).get('username') else str(uid)
+        buttons.append([InlineKeyboardButton("⚙️ مدیریت " + label, callback_data=f"admin_manage:{uid}")])
     buttons.append([InlineKeyboardButton("➕ افزودن ادمین", callback_data="admin_add")])
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+    await update.effective_message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 async def admin_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -925,12 +940,46 @@ async def admin_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
     await query.message.reply_text("🏷️ دسته‌های مجاز را ویرایش کنید:", reply_markup=InlineKeyboardMarkup(buttons))
 
+async def admin_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_super_admin(query.from_user.id):
+        return
+    admin_id = int(query.data.split(":", 1)[1])
+    config = load_admin_config()
+    label = config.get(str(admin_id), {}).get("username") or str(admin_id)
+    buttons = [
+        [InlineKeyboardButton("👤 تغییر username", callback_data=f"admin_username_edit:{admin_id}")],
+    ]
+    if admin_id not in SUPER_ADMIN_IDS:
+        buttons.append([InlineKeyboardButton("🏷️ تغییر دسته‌ها", callback_data=f"admin_edit:{admin_id}")])
+    buttons.append([InlineKeyboardButton("↩️ بازگشت", callback_data="admin_manage_back")])
+    await query.message.reply_text(f"⚙️ مدیریت ادمین {label}\n🔢 Telegram ID: {admin_id}", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def admin_manage_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await admin_manage_start(update, context)
+
 async def admin_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if not is_super_admin(query.from_user.id): return
     context.user_data["awaiting_new_admin_id"] = True
     await query.message.reply_text("🆔 آیدی عددی تلگرام ادمین جدید را ارسال کنید:", reply_markup=cancel_keyboard())
+
+async def admin_username_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_super_admin(query.from_user.id):
+        return
+    admin_id = int(query.data.split(":", 1)[1])
+    context.user_data["editing_admin_username_id"] = admin_id
+    context.user_data["awaiting_new_admin_username"] = True
+    await query.message.reply_text(
+        f"👤 username جدید برای Telegram ID {admin_id} را وارد کنید:\nمثال: hamid_admin",
+        reply_markup=cancel_keyboard(),
+    )
 
 async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -943,7 +992,13 @@ async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_
             await query.message.reply_text("حداقل یک دسته را انتخاب کنید.")
             return
         config = load_admin_config(); uid = str(context.user_data["new_admin_id"])
-        config[uid] = {"categories": sorted(selected)}; save_admin_config(config); ADMIN_IDS.add(int(uid))
+        previous = dict(config.get(uid, {}))
+        username = context.user_data.get("new_admin_username")
+        if username is None:
+            username = previous.get("username")
+        name = context.user_data.get("new_admin_name") or previous.get("name")
+        config[uid] = {"categories": sorted(selected), "username": username, "name": name}
+        save_admin_config(config); ADMIN_IDS.add(int(uid))
         context.user_data.pop("new_admin_id", None); context.user_data.pop("new_admin_categories", None)
         await query.message.reply_text("✅ ادمین و دسته‌های مجاز ذخیره شد.", reply_markup=main_menu(query.from_user.id)); return
     if cat in selected: selected.remove(cat)
@@ -953,20 +1008,84 @@ async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_
     buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
 
+
+async def _show_admin_categories(message, context):
+    buttons = [[InlineKeyboardButton("▫️ " + c, callback_data="admin_cat:" + c)] for c in ADMIN_CATEGORIES]
+    buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
+    await message.reply_text("🏷️ دسته‌های مجاز را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def receive_admin_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.pop("awaiting_new_admin_username", False):
+        # This handler is registered before the ID handler; delegate ordinary
+        # messages so the pending Telegram ID flow is not swallowed.
+        await receive_admin_id(update, context)
+        return
+    username = (update.message.text or "").strip().lstrip("@").replace(" ", "")
+    if not username or username.isdigit() or not re.fullmatch(r"[A-Za-z0-9_]{3,32}", username):
+        await update.message.reply_text("❌ username باید حداقل ۳ کاراکتر و شامل حروف انگلیسی، عدد یا _ باشد؛ دوباره وارد کنید یا /start بزنید.")
+        context.user_data["awaiting_new_admin_username"] = True
+        return
+    editing_id = context.user_data.pop("editing_admin_username_id", None)
+    if editing_id is not None:
+        config = load_admin_config()
+        info = dict(config.get(str(editing_id), {}))
+        info["username"] = username
+        config[str(editing_id)] = info
+        save_admin_config(config)
+        await update.message.reply_text(f"✅ username ادمین {editing_id} به @{username} تغییر کرد.", reply_markup=main_menu(update.effective_user.id))
+        return
+
+    context.user_data["new_admin_username"] = username
+    await update.message.reply_text(f"✅ username ثبت شد: @{username}")
+    await _show_admin_categories(update.message, context)
+
+async def skip_admin_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("awaiting_new_admin_username", None)
+    context.user_data["new_admin_username"] = None
+    await _show_admin_categories(query.message, context)
+
+async def receive_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.pop("awaiting_new_admin_id", False):
+        return
+    text = (update.message.text or "").strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+    try:
+        admin_id = int(text)
+    except ValueError:
+        context.user_data["awaiting_new_admin_id"] = True
+        await update.message.reply_text("آیدی باید فقط عددی باشد. دوباره ارسال کنید یا /start بزنید.", reply_markup=cancel_keyboard())
+        return
+
+    existing_ids = set(ADMIN_IDS) | set(SUPER_ADMIN_IDS)
+    for existing_key in load_admin_config().keys():
+        if str(existing_key).strip().isdigit():
+            existing_ids.add(int(existing_key))
+    if admin_id in existing_ids:
+        context.user_data["awaiting_new_admin_id"] = True
+        await update.message.reply_text(
+            f"⚠️ این Telegram ID قبلاً ثبت شده است:\n🔢 {admin_id}\n\nیک ID دیگر بفرستید یا /start بزنید.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    username = None
+    display_name = None
+    try:
+        chat = await context.bot.get_chat(admin_id)
+        username = chat.username
+        display_name = chat.full_name or chat.first_name
+    except Exception:
+        pass
+    context.user_data["new_admin_id"] = admin_id
+    context.user_data["new_admin_username"] = username
+    context.user_data["new_admin_name"] = display_name
+    context.user_data["new_admin_categories"] = []
+    context.user_data["awaiting_new_admin_username"] = True
+    await update.message.reply_text("✅ Telegram ID ثبت شد: " + str(admin_id) + "\n\nیک username برای نمایش در پنل وارد کنید (مثلاً hamid_admin):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]))
+
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
-    if context.user_data.pop("awaiting_new_admin_id", False):
-        try: admin_id = int(text)
-        except ValueError:
-            await update.message.reply_text("آیدی باید عددی باشد.")
-            context.user_data["awaiting_new_admin_id"] = True
-            return
-        context.user_data["new_admin_id"] = admin_id
-        context.user_data["new_admin_categories"] = []
-        buttons = [[InlineKeyboardButton("▫️ "+c, callback_data="admin_cat:"+c)] for c in ADMIN_CATEGORIES]
-        buttons.append([InlineKeyboardButton("💾 ذخیره دسترسی", callback_data="admin_cat:done")])
-        await update.message.reply_text("🏷️ دسته‌های مجاز را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
-        return
     if text == BTN_LIST: await cmd_list(update, context)
     elif text == BTN_SEARCH:
         context.user_data["awaiting_search"] = True
@@ -1086,44 +1205,11 @@ async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
     else:
         fire_event("search", user_id=update.effective_user.id, search_text=keyword, price_max=max_price, metadata={"result_count": len(results)})
-        await update.message.reply_text(
-            f"🔍 نتایج جستجو برای «{keyword}» ({len(results)} مورد):"
-        )
-        for product in results[:10]:
-            final_price = calculate_toman(
-                product.get("price_usd", 0), product.get("weight_grams")
-            )
-            description = clean_product_description(product)
-            description = description[:217] + "..." if len(description) > 220 else description
-            caption = (
-                f"📏 سایز: {product_size(product)}\n"
-                f"📦 {product.get('name', '-')}\n"
-                f"💵 قیمت نهایی: {toman(final_price)}\n"
-                f"🏷️ دسته: {product.get('category') or '-'} | 📍 {product.get('location') or '-'}\n"
-                f"📝 {description}"
-            )
-            photo_name = next(
-                (p for p in (product.get("original_photo_path") or "").split("|") if p),
-                None,
-            )
-            full_photo = None
-            if photo_name:
-                full_photo = photo_name if os.path.isabs(photo_name) else os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), photo_name
-                )
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "مشاهده جزئیات و عکس‌ها",
-                    callback_data=f"product_detail:{product['id']}",
-                )
-            ]])
-            if full_photo and os.path.exists(full_photo):
-                with open(full_photo, "rb") as photo:
-                    await update.message.reply_photo(
-                        photo=photo, caption=caption, reply_markup=markup
-                    )
-            else:
-                await update.message.reply_text(caption, reply_markup=markup)
+        context.user_data["list_products"] = results
+        context.user_data["list_page"] = 0
+        context.user_data["list_page_size"] = 5
+        context.user_data["list_title"] = f"🔍 نتایج جستجو برای «{keyword}»"
+        await _send_product_page(update, context, 0)
     await update.message.reply_text(
         "از منوی زیر انتخاب کنید:", reply_markup=main_menu(update.effective_user.id)
     )
@@ -1562,7 +1648,7 @@ async def stage_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Command: /list (paginated, with photos) ──────────────────
-LIST_PAGE_SIZE = 15
+LIST_PAGE_SIZE = 20
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1588,14 +1674,15 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _send_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
     products = context.user_data.get("list_products", [])
     total = len(products)
-    start = page * LIST_PAGE_SIZE
-    end = start + LIST_PAGE_SIZE
+    page_size = int(context.user_data.get("list_page_size", LIST_PAGE_SIZE))
+    start = page * page_size
+    end = start + page_size
     page_items = products[start:end]
 
     buttons = []
     for p in page_items:
         photo_mark = "🖼" if p.get("original_photo_path") else "▫️"
-        label = f"{photo_mark} {display_product_name(p, 35)} — ${p['price_usd']}"
+        label = f"{photo_mark} {display_product_name(p, 32)} · ${p['price_usd']} · {p.get('category') or "سایر"}"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"product_detail:{p['id']}")
         ])
@@ -1658,6 +1745,7 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (product.get("category") or "سایر").strip() == category
     ]
     context.user_data["list_products"] = products
+    context.user_data["list_page_size"] = LIST_PAGE_SIZE
     context.user_data["list_page"] = 0
     context.user_data["list_title"] = f"📂 {category}"
     await _send_product_page(update, context, 0)
@@ -1712,14 +1800,11 @@ async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_
                 handle.close()
     else:
         await query.message.reply_text(text)
-    await query.message.reply_text(
-        "گزینه‌های محصول:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "✨ اطلاعات بیشتر", callback_data=f"ai_info:{product_id}"
-            )
-        ]]),
-    )
+    owner_link = product.get("telegram_link_1") or product.get("telegram_link_2")
+    actions = []
+    if owner_link:
+        actions.append([InlineKeyboardButton("🛒 ثبت سفارش و گفتگو با ادمین", url=owner_link)])
+    await query.message.reply_text("برای این محصول چه کاری انجام می‌دهید؟", reply_markup=InlineKeyboardMarkup(actions))
     if is_admin(query.from_user.id):
         await query.message.reply_text(
             "عملیات محصول:",
@@ -2077,7 +2162,11 @@ def main():
     )
 
     # Priority handlers: these must work even when another conversation is active.
+    # /start is a global escape hatch: it clears pending admin/product/settings flows.
+    application.add_handler(CommandHandler("start", restart_conversation), group=-1)
     application.add_handler(CallbackQueryHandler(cancel, pattern=r"^cancel$"), group=-1)
+    application.add_handler(CallbackQueryHandler(skip_admin_username, pattern=r"^admin_username_skip$"), group=-1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_username, block=False), group=-2)
     application.add_handler(
         MessageHandler(filters.Regex(f"^(?:{BTN_ADMIN_MANAGE}|{BTN_ADMIN_REPORT})$"), menu_button),
         group=-1,
@@ -2085,7 +2174,6 @@ def main():
     application.add_handler(conv_handler)
 
     # Regular commands
-    application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("list", cmd_list))
     application.add_handler(CommandHandler("delete", cmd_delete))
@@ -2102,6 +2190,9 @@ def main():
     application.add_handler(CallbackQueryHandler(remove_photo_callback, pattern=r"^remove_photo:\d+:\d+$"))
     application.add_handler(CallbackQueryHandler(confirm_edit_callback, pattern=r"^confirm_edit$"))
     application.add_handler(CallbackQueryHandler(admin_edit_callback, pattern=r"^admin_edit:\d+$"))
+    application.add_handler(CallbackQueryHandler(admin_manage_callback, pattern=r"^admin_manage:\d+$"))
+    application.add_handler(CallbackQueryHandler(admin_manage_back_callback, pattern=r"^admin_manage_back$"))
+    application.add_handler(CallbackQueryHandler(admin_username_edit_callback, pattern=r"^admin_username_edit:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_add_callback, pattern=r"^admin_add$"))
     application.add_handler(CallbackQueryHandler(admin_category_callback, pattern=r"^admin_cat:"))
     application.add_handler(
@@ -2118,6 +2209,7 @@ def main():
             menu_button,
         )
     )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_id, block=False), group=-2)
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_search_cards)
     )
