@@ -1,109 +1,25 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>موجودی تهران | جستجوی محصولات</title>
-    <link rel="stylesheet" href="style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>داشبورد آنالیتیکس الیکاشاپ</title>
+  <link rel="stylesheet" href="dashboard.css">
 </head>
 <body>
-    <header>
-        <div class="container">
-            <div class="header-top">
-                <h1><i class="fas fa-warehouse"></i> موجودی تهران</h1>
-                <button id="admin-toggle" class="btn-admin">
-                    <i class="fas fa-user-shield"></i> ورود ادمین
-                </button>
-            </div>
-            <p class="subtitle">جستجوی هوشمند محصولات موجود در انبار تهران</p>
-        </div>
-    </header>
-
-    <main class="container">
-        <div class="search-controls">
-            <div class="search-box">
-                <i class="fas fa-search"></i>
-                <input type="text" id="search-input" placeholder="نام محصول، برند یا توضیحات را وارد کنید...">
-            </div>
-            <div class="filters">
-                <select id="category-filter">
-                    <option value="">همه دسته‌ها</option>
-                    <option value="کفش">کفش</option>
-                    <option value="صندل مردانه">صندل مردانه</option>
-                    <option value="کفش بچگانه">کفش بچگانه</option>
-                    <option value="کیف">کیف</option>
-                </select>
-                <div class="price-range">
-                    <input type="number" id="min-price" placeholder="حداقل قیمت ($)" min="0">
-                    <span>تا</span>
-                    <input type="number" id="max-price" placeholder="حداکثر قیمت ($)" min="0">
-                </div>
-                <button id="apply-filters" class="btn-primary">
-                    <i class="fas fa-filter"></i> اعمال فیلتر
-                </button>
-                <button id="reset-filters" class="btn-secondary">
-                    <i class="fas fa-redo"></i> ریست
-                </button>
-            </div>
-        </div>
-
-        <!-- بخش تنظیمات قیمت (فقط برای ادمین) -->
-        <div class="price-settings" id="price-settings" style="display: none;">
-            <h3><i class="fas fa-calculator"></i> تنظیمات قیمت‌گذاری (ادمین)</h3>
-            <div class="settings-form">
-                <div class="input-group">
-                    <label for="usd-rate">نرخ دلار (تومان)</label>
-                    <input type="number" id="usd-rate" value="200000">
-                </div>
-                <div class="input-group">
-                    <label for="shipping-per-kg">هزینه حمل (تومان/کیلوگرم)</label>
-                    <input type="number" id="shipping-per-kg" value="8000000">
-                </div>
-                <div class="input-group">
-                    <label for="multiplier">ضریب قیمت</label>
-                    <input type="number" id="multiplier" value="1.5" step="0.1">
-                </div>
-                <button id="save-settings" class="btn-primary">
-                    <i class="fas fa-save"></i> ذخیره تنظیمات
-                </button>
-                <button id="logout-admin" class="btn-secondary">
-                    <i class="fas fa-sign-out-alt"></i> خروج ادمین
-                </button>
-            </div>
-        </div>
-
-        <div class="products-container">
-            <div class="products-header">
-                <h2><i class="fas fa-boxes"></i> محصولات</h2>
-                <div class="sort-controls">
-                    <select id="sort-by">
-                        <option value="name">مرتب‌سازی: نام</option>
-                        <option value="price">مرتب‌سازی: قیمت (کم به زیاد)</option>
-                        <option value="price-desc">مرتب‌سازی: قیمت (زیاد به کم)</option>
-                        <option value="weight">مرتب‌سازی: وزن</option>
-                    </select>
-                    <span class="product-count" id="product-count">8 محصول</span>
-                </div>
-            </div>
-            <div id="products-list" class="products-list">
-                <!-- محصولات با جاوااسکریپت ساخته می‌شوند -->
-                <div class="loading">
-                    <i class="fas fa-spinner fa-spin"></i> در حال بارگذاری محصولات...
-                </div>
-            </div>
-        </div>
-    </main>
-
-    <footer>
-        <div class="container">
-            <p>© ۱۴۰۵ - سیستم موجودی تهران | نسخه MVP</p>
-            <p class="footer-note">برای استفاده ادمین: روی دکمه "ورود ادمین" در بالای صفحه کلیک کنید</p>
-            <p class="footer-note">اطلاعات ورود ادمین در کد منبع ذخیره نمی‌شود.</p>
-        </div>
-    </footer>
-
-    <script src="app.js"></script>
+  <aside class="side"><div class="logo"><i>E</i><b>الیکاشاپ</b></div><nav><a class="active" href="#overview">نمای کلی</a><a href="#demand">تقاضای مشتری</a><a href="#products">محصولات</a><a href="#admins">ادمین‌ها</a></nav><small>داشبورد سوپر ادمین<br>نسخه آزمایشی</small></aside>
+  <main>
+    <header><div><em>مرکز تصمیم‌گیری</em><h1>سلام، حمید 👋</h1><p>تصویر زنده‌ای از رفتار مشتری و عملکرد موجودی</p></div><div class="actions"><select id="days"><option value="7">۷ روز اخیر</option><option value="30" selected>۳۰ روز اخیر</option><option value="90">۹۰ روز اخیر</option></select><button id="refresh">↻ بروزرسانی</button></div></header>
+    <section class="kpis" id="overview"><article><span>کاربر یکتا</span><strong id="users">—</strong><small>در بازه انتخابی</small></article><article><span>جستجوها</span><strong id="searches">—</strong><small>تقاضای ثبت‌شده</small></article><article><span>مشاهده محصول</span><strong id="views">—</strong><small>تعامل با کاتالوگ</small></article><article><span>نرخ تبدیل</span><strong id="conversion">—</strong><small>جستجو تا خرید</small></article></section>
+    <section class="cols"><article class="panel"><h2>قیف رفتار مشتری</h2><p>از جستجو تا سفارش تکمیل‌شده</p><div class="funnel"><b><i id="f-search">۰</i><small>جستجو</small></b><b><i id="f-view">۰</i><small>مشاهده</small></b><b><i id="f-click">۰</i><small>کلیک سفارش</small></b><b><i id="f-order">۰</i><small>خرید</small></b></div></article><article class="panel"><h2>تقاضاهای داغ</h2><p>عبارت‌هایی که مشتری‌ها دنبال کرده‌اند</p><div id="demand-list" class="rows">در حال دریافت…</div></article></section>
+    <section id="demand" class="panel"><h2>تحلیل تقاضا</h2><p>برای تصمیم خرید و تأمین موجودی</p><div id="demand-table"></div></section>
+    <section class="cols"><article id="products" class="panel"><h2>محصولات پربازدید</h2><p>بیشترین توجه مشتری</p><div id="product-list" class="rows">در حال دریافت…</div></article><article id="admins" class="panel"><h2>عملکرد ادمین‌ها</h2><p>ثبت محصول و ارجاع سفارش</p><div id="admin-list" class="rows">در حال دریافت…</div></article></section>
+    <section id="catalog" class="panel"><div class="panel-head"><div><h2>مدیریت همه محصولات</h2><p>مشاهده، افزودن و ویرایش موجودی</p></div><button id="add-product">＋ افزودن محصول</button></div><div id="category-list" class="category-list"></div><input id="catalog-search" class="catalog-search" placeholder="جستجوی نام، دسته یا موقعیت…"><div id="catalog-table" class="table-scroll">در حال دریافت…</div></section>
+    <footer>وضعیت: <span id="status">آماده</span></footer>
+  </main>
+  <dialog id="setup"><form method="dialog"><h2>اتصال داشبورد</h2><p>توکن فقط تا زمان باز بودن همین تب در حافظه می‌ماند.</p><label>آدرس API<input id="api-url" value="http://127.0.0.1:8000"></label><label>توکن آنالیتیکس<input id="api-token" type="password"></label><label>توکن آپلود عکس<input id="media-token" type="password"></label><button>اتصال</button></form></dialog>
+  <dialog id="product-dialog"><div id="product-detail"></div></dialog>
+  <dialog id="product-form-dialog"><button class="modal-close" onclick="document.getElementById('product-form-dialog').close()">×</button><h2 id="form-title">افزودن محصول</h2><form id="product-form"><input type="hidden" id="form-id"><label>نام محصول<input id="form-name" required></label><div class="form-grid"><label>قیمت دلار<input id="form-price" type="number" step="0.01" required></label><label>وزن (گرم)<input id="form-weight" type="number" step="0.1"></label><label>سایز<input id="form-size"></label><label>دسته‌بندی<input id="form-category"></label><label>موقعیت<input id="form-location" value="تهران"></label></div><label>توضیحات<textarea id="form-description"></textarea></label><div class="form-actions"><button type="button" class="secondary" onclick="document.getElementById('product-form-dialog').close()">انصراف</button><button type="submit">ذخیره محصول</button></div></form></dialog>
+  <script src="dashboard.js"></script>
 </body>
 </html>
