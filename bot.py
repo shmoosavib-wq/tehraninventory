@@ -322,6 +322,47 @@ def admin_label(admin_id: int, config: dict | None = None) -> str:
     username = admin_username(admin_id, config)
     return f"@{username}" if username else str(admin_id)
 
+
+def set_admin_username(config: dict, admin_id: int, username: str | None) -> None:
+    """Set a unique display username without duplicating it across admins."""
+    value = (str(username or "").strip().lstrip("@").strip() or None)
+    if value:
+        wanted = value.casefold()
+        for key, info in config.items():
+            if str(key) == str(admin_id) or not isinstance(info, dict):
+                continue
+            existing = str(info.get("username") or "").strip().lstrip("@").strip()
+            if existing and existing.casefold() == wanted:
+                # A custom username identifies one admin in the management UI.
+                info.pop("username", None)
+    info = dict(config.get(str(admin_id), {}))
+    if value:
+        info["username"] = value
+    else:
+        info.pop("username", None)
+    config[str(admin_id)] = info
+
+
+def deduplicate_admin_usernames(config: dict) -> bool:
+    """Remove accidental duplicate custom usernames from older config files."""
+    seen: set[str] = set()
+    changed = False
+    keys = sorted(config, key=lambda key: (0, int(key)) if str(key).isdigit() else (1, str(key)))
+    for key in keys:
+        info = config.get(key)
+        if not isinstance(info, dict):
+            continue
+        username = str(info.get("username") or "").strip().lstrip("@").strip()
+        if not username:
+            continue
+        marker = username.casefold()
+        if marker in seen:
+            info.pop("username", None)
+            changed = True
+        else:
+            seen.add(marker)
+    return changed
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or str(user_id) in load_admin_config() or is_super_admin(user_id)
 
@@ -965,17 +1006,7 @@ async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
         return
     config = load_admin_config()
-    # Product records are a backwards-compatible fallback for admins created
-    # before the shared username config was introduced.
-    products = await call_api("GET", "/products")
-    for product in products:
-        uid = product.get("created_by_admin_id")
-        username = product.get("created_by_admin_username")
-        if uid and username and not admin_username(int(uid), config):
-            info = dict(config.get(str(int(uid)), {}))
-            info["username"] = str(username).lstrip("@").strip()
-            config[str(int(uid))] = info
-    if products:
+    if deduplicate_admin_usernames(config):
         save_admin_config(config)
     all_admin_ids = set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(uid) for uid in config if str(uid).isdigit()}
     lines = ["👥 مدیریت ادمین‌ها", "", "ادمین‌های فعلی:"]
@@ -1003,6 +1034,9 @@ async def admin_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     admin_id = int(query.data.split(":", 1)[1])
     config = load_admin_config()
     context.user_data["new_admin_id"] = admin_id
+    context.user_data["editing_existing_admin"] = True
+    context.user_data.pop("new_admin_username", None)
+    context.user_data.pop("new_admin_name", None)
     context.user_data["new_admin_categories"] = list(config.get(str(admin_id), {}).get("categories", []))
     selected = set(context.user_data["new_admin_categories"])
     buttons = [[InlineKeyboardButton(("✅ " if c in selected else "▫️ ") + c, callback_data="admin_cat:" + c)] for c in ADMIN_CATEGORIES]
@@ -1052,6 +1086,9 @@ async def admin_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     if not is_super_admin(query.from_user.id): return
     context.user_data["awaiting_new_admin_id"] = True
+    context.user_data["editing_existing_admin"] = False
+    context.user_data.pop("new_admin_username", None)
+    context.user_data.pop("new_admin_name", None)
     await query.message.reply_text("🆔 آیدی عددی تلگرام ادمین جدید را ارسال کنید:", reply_markup=cancel_keyboard())
 
 async def admin_username_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1080,12 +1117,19 @@ async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_
         config = load_admin_config(); uid = str(context.user_data["new_admin_id"])
         previous = dict(config.get(uid, {}))
         username = context.user_data.get("new_admin_username")
-        if username is None:
+        if context.user_data.get("editing_existing_admin") or username is None:
             username = previous.get("username")
         name = context.user_data.get("new_admin_name") or previous.get("name")
-        config[uid] = {"categories": sorted(selected), "username": username, "name": name}
+        # Preserve the existing record and update only the fields changed in
+        # this flow, so category edits never erase username/name data.
+        updated = dict(previous)
+        updated["categories"] = sorted(selected)
+        updated["name"] = name
+        config[uid] = updated
+        set_admin_username(config, int(uid), username)
         save_admin_config(config); ADMIN_IDS.add(int(uid))
-        context.user_data.pop("new_admin_id", None); context.user_data.pop("new_admin_categories", None)
+        for key in ("new_admin_id", "new_admin_categories", "new_admin_username", "new_admin_name", "editing_existing_admin"):
+            context.user_data.pop(key, None)
         await query.message.reply_text("✅ ادمین و دسته‌های مجاز ذخیره شد.", reply_markup=main_menu(query.from_user.id)); return
     if cat in selected: selected.remove(cat)
     else: selected.add(cat)
@@ -1114,9 +1158,7 @@ async def receive_admin_username(update: Update, context: ContextTypes.DEFAULT_T
     editing_id = context.user_data.pop("editing_admin_username_id", None)
     if editing_id is not None:
         config = load_admin_config()
-        info = dict(config.get(str(editing_id), {}))
-        info["username"] = username
-        config[str(editing_id)] = info
+        set_admin_username(config, int(editing_id), username)
         save_admin_config(config)
         await update.message.reply_text(f"✅ username ادمین {editing_id} به @{username} تغییر کرد.", reply_markup=main_menu(update.effective_user.id))
         return
