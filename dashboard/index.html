@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>داشبورد آنالیتیکس الیکاشاپ</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <aside class="side"><div class="logo"><i>E</i><b>الیکاشاپ</b></div><nav><a class="active" href="#overview">نمای کلی</a><a href="#demand">تقاضای مشتری</a><a href="#products">محصولات</a><a href="#admins">ادمین‌ها</a></nav><small>داشبورد سوپر ادمین<br>نسخه آزمایشی</small></aside>
+  <main>
+    <header><div><em>مرکز تصمیم‌گیری</em><h1>سلام، حمید 👋</h1><p>تصویر زنده‌ای از رفتار مشتری و عملکرد موجودی</p></div><div class="actions"><select id="days"><option value="7">۷ روز اخیر</option><option value="30" selected>۳۰ روز اخیر</option><option value="90">۹۰ روز اخیر</option></select><button id="refresh">↻ بروزرسانی</button></div></header>
+    <section class="kpis" id="overview"><article><span>کاربر یکتا</span><strong id="users">—</strong><small>در بازه انتخابی</small></article><article><span>جستجوها</span><strong id="searches">—</strong><small>تقاضای ثبت‌شده</small></article><article><span>مشاهده محصول</span><strong id="views">—</strong><small>تعامل با کاتالوگ</small></article><article><span>نرخ تبدیل</span><strong id="conversion">—</strong><small>جستجو تا خرید</small></article></section>
+    <section class="cols"><article class="panel"><h2>قیف رفتار مشتری</h2><p>از جستجو تا سفارش تکمیل‌شده</p><div class="funnel"><b><i id="f-search">۰</i><small>جستجو</small></b><b><i id="f-view">۰</i><small>مشاهده</small></b><b><i id="f-click">۰</i><small>کلیک سفارش</small></b><b><i id="f-order">۰</i><small>خرید</small></b></div></article><article class="panel"><h2>تقاضاهای داغ</h2><p>عبارت‌هایی که مشتری‌ها دنبال کرده‌اند</p><div id="demand-list" class="rows">در حال دریافت…</div></article></section>
+    <section id="demand" class="panel"><h2>تحلیل تقاضا</h2><p>برای تصمیم خرید و تأمین موجودی</p><div id="demand-table"></div></section>
+    <section class="cols"><article id="products" class="panel"><h2>محصولات پربازدید</h2><p>بیشترین توجه مشتری</p><div id="product-list" class="rows">در حال دریافت…</div></article><article id="admins" class="panel"><h2>عملکرد ادمین‌ها</h2><p>ثبت محصول و ارجاع سفارش</p><div id="admin-list" class="rows">در حال دریافت…</div></article></section>
+    <section id="catalog" class="panel"><div class="panel-head"><div><h2>مدیریت همه محصولات</h2><p>مشاهده، افزودن و ویرایش موجودی</p></div><button id="add-product">＋ افزودن محصول</button></div><div id="category-list" class="category-list"></div><input id="catalog-search" class="catalog-search" placeholder="جستجوی نام، دسته یا موقعیت…"><div id="catalog-table" class="table-scroll">در حال دریافت…</div></section>
+    <footer>وضعیت: <span id="status">آماده</span></footer>
+  </main>
+  <dialog id="setup"><form method="dialog"><h2>اتصال داشبورد</h2><p>توکن فقط تا زمان باز بودن همین تب در حافظه می‌ماند.</p><label>آدرس API<input id="api-url" value="http://127.0.0.1:8000"></label><label>توکن آنالیتیکس<input id="api-token" type="password"></label><label>توکن آپلود عکس<input id="media-token" type="password"></label><button>اتصال</button></form></dialog>
+  <dialog id="product-dialog"><div id="product-detail"></div></dialog>
+  <dialog id="product-form-dialog"><button class="modal-close" onclick="document.getElementById('product-form-dialog').close()">×</button><h2 id="form-title">افزودن محصول</h2><form id="product-form"><input type="hidden" id="form-id"><label>نام محصول<input id="form-name" required></label><div class="form-grid"><label>قیمت دلار<input id="form-price" type="number" step="0.01" required></label><label>وزن (گرم)<input id="form-weight" type="number" step="0.1"></label><label>سایز<input id="form-size"></label><label>دسته‌بندی<input id="form-category"></label><label>موقعیت<input id="form-location" value="تهران"></label></div><label>توضیحات<textarea id="form-description"></textarea></label><div class="form-actions"><button type="button" class="secondary" onclick="document.getElementById('product-form-dialog').close()">انصراف</button><button type="submit">ذخیره محصول</button></div></form></dialog>
+  <script src="dashboard.js"></script>
+</body>
+</html>
