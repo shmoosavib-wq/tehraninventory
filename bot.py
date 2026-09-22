@@ -52,7 +52,37 @@ if not BOT_TOKEN:
 PHOTOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photos")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-ADMIN_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admins.json")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_LEGACY_ADMIN_CONFIG_FILE = os.path.join(_BASE_DIR, "admins.json")
+
+
+def _admin_config_path() -> str:
+    """Return one canonical, persistent admin config path.
+
+    Railway volumes are mounted at /data.  Keep the local file as a fallback so
+    local development continues to work, while production survives restarts
+    and every bot handler reads the same file.
+    """
+    configured = os.environ.get("ADMIN_CONFIG_FILE", "").strip()
+    if configured:
+        return configured
+    data_dir = "/data"
+    # On Windows, C:\data may exist for local API photos; it is not the
+    # Railway persistent volume. Only use the conventional /data mount on
+    # Linux (or opt in explicitly with ADMIN_CONFIG_FILE).
+    if os.name != "nt" and os.path.isdir(data_dir) and os.access(data_dir, os.W_OK):
+        persistent = os.path.join(data_dir, "admins.json")
+        if not os.path.exists(persistent) and os.path.exists(_LEGACY_ADMIN_CONFIG_FILE):
+            try:
+                import shutil
+                shutil.copyfile(_LEGACY_ADMIN_CONFIG_FILE, persistent)
+            except OSError:
+                pass
+        return persistent
+    return _LEGACY_ADMIN_CONFIG_FILE
+
+
+ADMIN_CONFIG_FILE = _admin_config_path()
 DEFAULT_SETTINGS = {
     "usd_rate": 200000,
     "shipping_per_kg": 8000000,
@@ -77,7 +107,18 @@ def category_access(user_id: int) -> set[str]:
     config = load_admin_config()
     saved = config.get(str(user_id))
     if isinstance(saved, dict):
-        return set(saved.get("categories") or [])
+        values = set(saved.get("categories") or [])
+        # Legacy exports sometimes stored UTF-8 Persian as mojibake. Normalize
+        # those values once at comparison time so existing permissions continue
+        # to work with correctly encoded product categories.
+        fixed = set()
+        for value in values:
+            try:
+                repaired = value.encode("latin1").decode("utf-8") if "Ã" in value or "Ø" in value else value
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                repaired = value
+            fixed.add(repaired)
+        return fixed
     raw = os.environ.get("ADMIN_CATEGORY_ACCESS", "")
     for entry in raw.split(";"):
         if ":" not in entry: continue
@@ -86,7 +127,11 @@ def category_access(user_id: int) -> set[str]:
     return set()
 
 def can_manage_product(user_id: int, product: dict) -> bool:
-    return is_super_admin(user_id) or (product.get("category") or "سایر").strip() in category_access(user_id)
+    if is_super_admin(user_id):
+        return True
+    category = (product.get("category") or "سایر").strip()
+    access = category_access(user_id)
+    return "*" in access or category in access
 
 # ── Logging ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -125,7 +170,7 @@ BTN_MANAGE = "🛠 مدیریت محصولات"
 def main_menu(user_id: int) -> ReplyKeyboardMarkup:
     rows = [[BTN_LIST, BTN_SEARCH]]
     if is_admin(user_id):
-        rows.append([BTN_ADD, BTN_ADD_PHOTO])
+        rows.append([BTN_ADD_PHOTO])
         rows.append([BTN_QUICK_ADD])
         rows.append([BTN_ADD_HELP])
         if is_super_admin(user_id):
@@ -251,15 +296,31 @@ def extract_price_max(query: str) -> float | None:
 # ── Helpers ───────────────────────────────────────────────────
 def load_admin_config() -> dict:
     try:
-        with open(ADMIN_CONFIG_FILE, "r", encoding="utf-8") as file:
+        with open(ADMIN_CONFIG_FILE, "r", encoding="utf-8-sig") as file:
             data = json.load(file)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 def save_admin_config(data: dict) -> None:
+    os.makedirs(os.path.dirname(ADMIN_CONFIG_FILE) or ".", exist_ok=True)
     with open(ADMIN_CONFIG_FILE, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
+
+
+def admin_username(admin_id: int, config: dict | None = None) -> str | None:
+    """Read the canonical custom username for an admin."""
+    config = config if config is not None else load_admin_config()
+    info = config.get(str(int(admin_id)), {})
+    if not isinstance(info, dict):
+        return None
+    value = str(info.get("username") or "").strip().lstrip("@").strip()
+    return value or None
+
+
+def admin_label(admin_id: int, config: dict | None = None) -> str:
+    username = admin_username(admin_id, config)
+    return f"@{username}" if username else str(admin_id)
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or str(user_id) in load_admin_config() or is_super_admin(user_id)
@@ -886,15 +947,11 @@ async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_admin_config()
     ids = sorted(set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(x) for x in config if str(x).isdigit()})
     lines = ["📊 گزارش فعالیت ادمین‌ها", ""]
-    usernames = {
-        int(uid): info.get("username")
-        for uid, info in config.items()
-        if str(uid).strip().isdigit() and info.get("username")
-    }
+    usernames = {uid: admin_username(uid, config) for uid in ids}
     for product in products:
         uid = product.get("created_by_admin_id")
         if uid and not usernames.get(uid) and product.get("created_by_admin_username"):
-            usernames[uid] = product.get("created_by_admin_username")
+            usernames[uid] = str(product.get("created_by_admin_username")).lstrip("@").strip()
     for uid in ids:
         created = sum(1 for p in products if p.get("created_by_admin_id") == uid)
         owned = sum(1 for p in products if p.get("owner_admin_id") == uid)
@@ -908,6 +965,18 @@ async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
         return
     config = load_admin_config()
+    # Product records are a backwards-compatible fallback for admins created
+    # before the shared username config was introduced.
+    products = await call_api("GET", "/products")
+    for product in products:
+        uid = product.get("created_by_admin_id")
+        username = product.get("created_by_admin_username")
+        if uid and username and not admin_username(int(uid), config):
+            info = dict(config.get(str(int(uid)), {}))
+            info["username"] = str(username).lstrip("@").strip()
+            config[str(int(uid))] = info
+    if products:
+        save_admin_config(config)
     all_admin_ids = set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(uid) for uid in config if str(uid).isdigit()}
     lines = ["👥 مدیریت ادمین‌ها", "", "ادمین‌های فعلی:"]
     if all_admin_ids:
@@ -915,13 +984,13 @@ async def admin_manage_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
             info = config.get(str(uid), {})
             cats = ", ".join(info.get("categories", [])) or "همه دسته‌ها"
             role = "سوپرادمین" if uid in SUPER_ADMIN_IDS else "ادمین"
-            username = info.get("username") or next((p.get("created_by_admin_username") for p in [] if p.get("created_by_admin_id") == uid), None)
+            username = admin_username(uid, config)
             label = f"@{username}" if username else "بدون username"
             lines.append(f"👤 {label} | {role}\n🔢 Telegram ID: {uid}\n🏷️ دسته‌ها: {cats}")
     lines.append("\nبرای افزودن ادمین جدید یا تغییر دسته‌ها از دکمه‌ها استفاده کنید.")
     buttons = []
     for uid in sorted(all_admin_ids):
-        label = f"@{config.get(str(uid), {}).get('username')}" if config.get(str(uid), {}).get('username') else str(uid)
+        label = admin_label(uid, config)
         buttons.append([InlineKeyboardButton("⚙️ مدیریت " + label, callback_data=f"admin_manage:{uid}")])
     buttons.append([InlineKeyboardButton("➕ افزودن ادمین", callback_data="admin_add")])
     await update.effective_message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
@@ -947,14 +1016,31 @@ async def admin_manage_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     admin_id = int(query.data.split(":", 1)[1])
     config = load_admin_config()
-    label = config.get(str(admin_id), {}).get("username") or str(admin_id)
+    label = admin_label(admin_id, config)
     buttons = [
         [InlineKeyboardButton("👤 تغییر username", callback_data=f"admin_username_edit:{admin_id}")],
     ]
     if admin_id not in SUPER_ADMIN_IDS:
         buttons.append([InlineKeyboardButton("🏷️ تغییر دسته‌ها", callback_data=f"admin_edit:{admin_id}")])
+        buttons.append([InlineKeyboardButton("🗑 حذف ادمین", callback_data=f"admin_delete:{admin_id}")])
     buttons.append([InlineKeyboardButton("↩️ بازگشت", callback_data="admin_manage_back")])
     await query.message.reply_text(f"⚙️ مدیریت ادمین {label}\n🔢 Telegram ID: {admin_id}", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_super_admin(query.from_user.id):
+        return
+    admin_id = int(query.data.split(":", 1)[1])
+    if admin_id in SUPER_ADMIN_IDS:
+        await query.message.reply_text("⛔ حذف سوپرادمین مجاز نیست.")
+        return
+    config = load_admin_config()
+    config.pop(str(admin_id), None)
+    save_admin_config(config)
+    ADMIN_IDS.discard(admin_id)
+    context.user_data.clear()
+    await query.message.reply_text(f"✅ ادمین {admin_id} حذف شد.", reply_markup=main_menu(query.from_user.id))
 
 async def admin_manage_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1156,63 +1242,56 @@ async def receive_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.pop("awaiting_search", False):
-        return
-    keyword = update.message.text.strip()
-    products = await call_api("GET", "/products")
-    query_normalized = normalize_query_for_search(keyword)
-    query_tokens = [token for token in query_normalized.split() if len(token) > 1]
+async def rank_customer_search(keyword: str, products: list[dict]) -> list[dict]:
+    query = normalize_query_for_search(keyword)
+    tokens = [t for t in query.split() if len(t) > 1]
     max_price = extract_price_max(keyword)
-    male_shoe_query = "مردانه" in query_normalized and "کفش" in query_normalized
     ranked = []
     for product in products:
         if max_price is not None and float(product.get("price_usd") or 0) > max_price:
             continue
-        searchable = normalize_search_text_v2(" ".join(
-            str(product.get(field) or "")
-            for field in ("name", "description", "category", "location", "size")
-        ))
-        searchable_tokens = searchable.split()
-        female_shoe_query = (
-            any(term in query_normalized for term in ("بچگانه", "زنانه"))
-            and "کفش" in query_normalized
-        )
-        if female_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
-            if not any(term in searchable for term in ("دخترانه", "زنانه", "بچگانه")):
-                continue
-        token_scores = [
-            search_token_similarity(token, searchable_tokens)
-            for token in query_tokens
-        ]
-        token_hits = sum(score >= 0.72 for score in token_scores)
-        if male_shoe_query and normalize_search_text_v2(product.get("category")) == "کفش":
-            if "زنانه" not in searchable and "بچگانه" not in searchable:
-                token_hits += 2
-        if query_normalized in searchable or (
-            query_tokens and token_hits == len(query_tokens)
-        ):
-            ranked.append((2, sum(token_scores), product))
-        elif token_hits and len(query_tokens) == 1 and token_scores[0] >= 0.78:
-            ranked.append((1, sum(token_scores), product))
-    results = [
-        product for _, _, product in sorted(
-            ranked, key=lambda item: (item[0], item[1]), reverse=True
-        )
-    ]
+        title = normalize_search_text_v2(str(product.get("name") or ""))
+        category = normalize_search_text_v2(str(product.get("category") or ""))
+        details = normalize_search_text_v2(" ".join(str(product.get(k) or "") for k in ("description", "location", "size")))
+        title_tokens = title.split()
+        category_tokens = category.split()
+        scores = []
+        for token in tokens:
+            title_score = search_token_similarity(token, title_tokens) if title_tokens else 0
+            category_score = search_token_similarity(token, category_tokens) if category_tokens else 0
+            detail_score = search_token_similarity(token, details.split()) if details else 0
+            scores.append(max(title_score, category_score * 0.92, detail_score * 0.68))
+        hits = sum(score >= 0.62 for score in scores)
+        exact_title = all(token in title for token in tokens) if tokens else False
+        if tokens and hits < len(tokens) and not exact_title:
+            continue
+        score = sum(scores) + (1.5 if exact_title else 0) + (0.35 if category_tokens and any(t in category_tokens for t in tokens) else 0)
+        ranked.append((score, product))
+    return [p for _, p in sorted(ranked, key=lambda item: item[0], reverse=True)]
+
+async def receive_search_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.pop("awaiting_search", False):
+        return
+    keyword = (update.message.text or "").strip()
+    if len(keyword) < 2:
+        context.user_data["awaiting_search"] = True
+        await update.message.reply_text("🔍 حداقل دو حرف از نام یا ویژگی محصول را وارد کنید.")
+        return
+    try:
+        products = await call_api("GET", "/products")
+        results = await rank_customer_search(keyword, products)
+    except Exception:
+        logger.exception("Customer search failed")
+        await update.message.reply_text("❌ جست‌وجو موقتاً در دسترس نیست؛ دوباره تلاش کنید.")
+        return
+    max_price = extract_price_max(keyword)
     if not results:
         fire_event("search_no_result", user_id=update.effective_user.id, search_text=keyword, price_max=max_price, metadata={"result_count": 0})
-        await update.message.reply_text(f"🔍 نتیجه‌ای برای «{keyword}» پیدا نشد.")
-    else:
-        fire_event("search", user_id=update.effective_user.id, search_text=keyword, price_max=max_price, metadata={"result_count": len(results)})
-        context.user_data["list_products"] = results
-        context.user_data["list_page"] = 0
-        context.user_data["list_page_size"] = 5
-        context.user_data["list_title"] = f"🔍 نتایج جستجو برای «{keyword}»"
-        await _send_product_page(update, context, 0)
-    await update.message.reply_text(
-        "از منوی زیر انتخاب کنید:", reply_markup=main_menu(update.effective_user.id)
-    )
+        await update.message.reply_text(f"🔍 برای «{keyword}» نتیجهٔ دقیقی پیدا نشد.\nنام برند یا دسته را کوتاه‌تر وارد کنید.", reply_markup=main_menu(update.effective_user.id))
+        return
+    fire_event("search", user_id=update.effective_user.id, search_text=keyword, price_max=max_price, metadata={"result_count": len(results)})
+    context.user_data.update({"list_products": results, "list_page": 0, "list_page_size": 5, "list_title": f"🔍 نتایج «{keyword}»"})
+    await _send_product_page(update, context, 0)
 
 
 # ── Conversation: /add ───────────────────────────────────────
@@ -1791,13 +1870,14 @@ async def product_detail_callback(update: Update, context: ContextTypes.DEFAULT_
                     handles.append(handle)
                 media.append(InputMediaPhoto(
                     media=handle,
-                    caption=text if not media else None,
-                    parse_mode="Markdown" if not media else None,
                 ))
             await query.message.reply_media_group(media=media)
         finally:
             for handle in handles:
                 handle.close()
+        # Keep the details in a separate message so Telegram opens the latest
+        # message on the product description instead of the category list.
+        await query.message.reply_text(text)
     else:
         await query.message.reply_text(text)
     owner_link = product.get("telegram_link_1") or product.get("telegram_link_2")
@@ -2192,6 +2272,7 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_edit_callback, pattern=r"^admin_edit:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_manage_callback, pattern=r"^admin_manage:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_manage_back_callback, pattern=r"^admin_manage_back$"))
+    application.add_handler(CallbackQueryHandler(admin_delete_callback, pattern=r"^admin_delete:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_username_edit_callback, pattern=r"^admin_username_edit:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_add_callback, pattern=r"^admin_add$"))
     application.add_handler(CallbackQueryHandler(admin_category_callback, pattern=r"^admin_cat:"))
