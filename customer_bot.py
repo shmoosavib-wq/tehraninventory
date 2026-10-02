@@ -70,7 +70,8 @@ def contact_target(value):
         value=re.sub(r'^https?://','',value,flags=re.I)
         value=re.sub(r'^(?:www\.)?(?:t\.me|telegram\.me)/','',value,flags=re.I)
         value=value.split('/',1)[0].split('?',1)[0].split('#',1)[0]
-    if re.fullmatch(r'[A-Za-z0-9_]{5,32}',value):
+    # Numeric Telegram IDs are not usernames and must never become t.me links.
+    if not value.isdigit() and re.fullmatch(r'[A-Za-z0-9_]{5,32}',value):
         return 'https://t.me/'+value
     # Telegram does not allow a normal URL button to open a private user by ID.
     # Never construct tg://user?id= links; use a verified public username instead.
