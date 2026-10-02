@@ -38,7 +38,7 @@ app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials
 RAILWAY_PHOTO_DIR = Path(os.environ.get("PHOTO_DIR", "/data/photos"))
 RAILWAY_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 ROUTING_FILE = Path(os.environ.get("ROUTING_FILE", "/data/routing.json"))
-DEFAULT_ROUTING = {"categories": {}, "default_admin_id": None}
+DEFAULT_ROUTING = {"categories": {}, "default_admin_id": None, "admin_usernames": {}}
 
 def load_routing() -> dict:
     try:

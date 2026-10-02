@@ -1102,6 +1102,7 @@ async def admin_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["awaiting_new_admin_id"] = True
     context.user_data["editing_existing_admin"] = False
     context.user_data.pop("new_admin_username", None)
+    context.user_data.pop("new_admin_telegram_username", None)
     context.user_data.pop("new_admin_name", None)
     await query.message.reply_text("🆔 آیدی عددی تلگرام ادمین جدید را ارسال کنید:", reply_markup=cancel_keyboard())
 
@@ -1139,10 +1140,16 @@ async def admin_category_callback(update: Update, context: ContextTypes.DEFAULT_
         updated = dict(previous)
         updated["categories"] = sorted(selected)
         updated["name"] = name
+        actual_telegram_username = (
+            context.user_data.get("new_admin_telegram_username")
+            or previous.get("telegram_username")
+        )
+        if actual_telegram_username:
+            updated["telegram_username"] = actual_telegram_username
         config[uid] = updated
         set_admin_username(config, int(uid), username)
         save_admin_config(config); ADMIN_IDS.add(int(uid))
-        for key in ("new_admin_id", "new_admin_categories", "new_admin_username", "new_admin_name", "editing_existing_admin"):
+        for key in ("new_admin_id", "new_admin_categories", "new_admin_username", "new_admin_telegram_username", "new_admin_name", "editing_existing_admin"):
             context.user_data.pop(key, None)
         await query.message.reply_text("✅ ادمین و دسته‌های مجاز ذخیره شد.", reply_markup=main_menu(query.from_user.id)); return
     if cat in selected: selected.remove(cat)
@@ -1221,6 +1228,7 @@ async def receive_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     context.user_data["new_admin_id"] = admin_id
     context.user_data["new_admin_username"] = username
+    context.user_data["new_admin_telegram_username"] = username
     context.user_data["new_admin_name"] = display_name
     context.user_data["new_admin_categories"] = []
     context.user_data["awaiting_new_admin_username"] = True
@@ -1269,12 +1277,36 @@ async def routing_set_callback(update, context):
     await q.answer()
     uid = int(q.data.split(":", 1)[1]); key = context.user_data.get("routing_category")
     data = await call_api("GET", "/public/routing", headers={"X-Routing-Token": ROUTING_TOKEN})
+    usernames = data.setdefault("admin_usernames", {})
+    username_lookup_succeeded = False
+    actual_username = None
+    try:
+        admin_chat = await context.bot.get_chat(uid)
+        username_lookup_succeeded = True
+        actual_username = admin_chat.username
+    except Exception:
+        logger.info("Could not refresh Telegram username for routed admin id=%s", uid)
+    if actual_username:
+        usernames[str(uid)] = actual_username.lstrip("@").strip()
+        config = load_admin_config()
+        if str(uid) in config and isinstance(config[str(uid)], dict):
+            config[str(uid)]["telegram_username"] = actual_username.lstrip("@").strip()
+            save_admin_config(config)
+    elif username_lookup_succeeded:
+        usernames.pop(str(uid), None)
+    else:
+        saved_username = load_admin_config().get(str(uid), {}).get("telegram_username")
+        if saved_username:
+            usernames[str(uid)] = str(saved_username).lstrip("@").strip()
     if key == "default": data["default_admin_id"] = uid
     else:
         cats = data.setdefault("categories", {})
         cats[ADMIN_CATEGORIES[int(key)]] = uid
     await call_api("PUT", "/public/routing", data=data, headers={"X-Routing-Token": ROUTING_TOKEN})
-    await q.message.reply_text("✅ مسئول فروش ذخیره شد.", reply_markup=main_menu(q.from_user.id))
+    result = "✅ مسئول فروش ذخیره شد."
+    if not usernames.get(str(uid)):
+        result += "\n⚠️ برای بازشدن مستقیم چت، این ادمین باید username عمومی تلگرام داشته باشد؛ تا آن زمان دکمهٔ محصول به ادمین سفارش پشتیبان می‌رود."
+    await q.message.reply_text(result, reply_markup=main_menu(q.from_user.id))
 
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
