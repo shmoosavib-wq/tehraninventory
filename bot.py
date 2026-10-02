@@ -86,7 +86,7 @@ def _admin_config_path() -> str:
 
 ADMIN_CONFIG_FILE = _admin_config_path()
 DEFAULT_SETTINGS = {
-    "usd_rate": 200000,
+    "usd_rate": 150000,
     "shipping_per_kg": 8000000,
     "multiplier": 1.5,
 }
@@ -383,20 +383,66 @@ def load_settings() -> dict:
         return DEFAULT_SETTINGS.copy()
 
 
-def save_settings(settings: dict) -> None:
+def _cache_settings(settings: dict) -> None:
     import json
     with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
         json.dump(settings, file, ensure_ascii=False, indent=2)
-    if PRICING_SYNC_TOKEN:
+
+
+async def refresh_settings() -> dict | None:
+    """Read the canonical pricing config from the API and refresh the local cache."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                API_BASE_URL.rstrip("/") + "/public/pricing"
+            )
+            response.raise_for_status()
+            values = response.json()
+        if not isinstance(values, dict):
+            raise ValueError("Pricing API returned an invalid payload")
+        settings = {**DEFAULT_SETTINGS, **{
+            key: values[key] for key in DEFAULT_SETTINGS if key in values
+        }}
         try:
-            httpx.put(
-                API_BASE_URL.rstrip("/") + "/public/pricing",
-                headers={"X-Pricing-Token": PRICING_SYNC_TOKEN},
-                json=settings,
-                timeout=15,
-            ).raise_for_status()
-        except Exception:
-            logger.exception("Could not sync pricing settings to API")
+            _cache_settings(settings)
+        except OSError:
+            logger.exception("Pricing loaded from API, but local cache could not be updated")
+        return settings
+    except Exception:
+        logger.exception("Could not load pricing settings from API")
+        return None
+
+
+async def save_settings(settings: dict) -> dict:
+    """Persist pricing centrally first; the local file is only a cache."""
+    if not PRICING_SYNC_TOKEN:
+        raise RuntimeError("PRICING_SYNC_TOKEN is not configured")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.put(
+            API_BASE_URL.rstrip("/") + "/public/pricing",
+            headers={"X-Pricing-Token": PRICING_SYNC_TOKEN},
+            json=settings,
+        )
+        response.raise_for_status()
+        values = response.json()
+    if not isinstance(values, dict):
+        raise ValueError("Pricing API returned an invalid payload")
+    saved = {**DEFAULT_SETTINGS, **{
+        key: values[key] for key in DEFAULT_SETTINGS if key in values
+    }}
+    try:
+        _cache_settings(saved)
+    except OSError:
+        # The API is authoritative; a failed local cache write must not undo it.
+        logger.exception("Pricing saved to API, but local cache could not be updated")
+    return saved
+
+
+async def refresh_pricing_on_start(application) -> None:
+    if await refresh_settings() is None:
+        logger.warning("Pricing API unavailable at startup; using the last local cache")
+    else:
+        logger.info("Pricing settings loaded from API")
 
 
 def calculate_toman(price_usd: float, weight_grams: float | None) -> float:
@@ -615,7 +661,13 @@ async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ این دستور فقط برای ادمین است.")
         return ConversationHandler.END
-    settings = load_settings()
+    settings = await refresh_settings()
+    if settings is None:
+        await update.message.reply_text(
+            "❌ دریافت تنظیمات قیمت از API ناموفق بود؛ برای جلوگیری از ذخیره نرخ قدیمی، تغییری انجام نشد. اتصال API را بررسی و دوباره تلاش کنید.",
+            reply_markup=main_menu(update.effective_user.id),
+        )
+        return ConversationHandler.END
     context.user_data["editing_settings"] = settings
     await update.message.reply_text(
         "⚙️ تنظیمات محاسبه قیمت\n\n"
@@ -668,7 +720,15 @@ async def settings_multiplier(update: Update, context: ContextTypes.DEFAULT_TYPE
         return SET_MULTIPLIER
     settings = context.user_data["editing_settings"]
     settings["multiplier"] = value
-    save_settings(settings)
+    try:
+        settings = await save_settings(settings)
+    except Exception:
+        logger.exception("Could not save pricing settings to API")
+        await update.message.reply_text(
+            "❌ ذخیره قیمت در API انجام نشد؛ تنظیم قبلی حفظ شد. اتصال API و PRICING_SYNC_TOKEN را بررسی کنید و دوباره تلاش کنید.",
+            reply_markup=cancel_keyboard(),
+        )
+        return SET_MULTIPLIER
     context.user_data.pop("editing_settings", None)
     await update.message.reply_text(
         "✅ تنظیمات ذخیره شد.\n\n"
@@ -685,7 +745,13 @@ async def cmd_price_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ این دستور فقط برای ادمین است.")
         return
-    settings = load_settings()
+    settings = await refresh_settings()
+    if settings is None:
+        await update.message.reply_text(
+            "⚠️ API قیمت در دسترس نیست؛ عدد ذخیره‌شدهٔ محلی ممکن است قدیمی باشد.",
+            reply_markup=main_menu(update.effective_user.id),
+        )
+        return
     await update.message.reply_text(
         "⚙️ تنظیمات فعلی قیمت:\n"
         f"نرخ دلار: {settings['usd_rate']:,.0f} تومان\n"
@@ -2248,7 +2314,12 @@ async def quick_add_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear(); return ConversationHandler.END
 # ── Main ─────────────────────────────────────────────────────
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(refresh_pricing_on_start)
+        .build()
+    )
 
     settings_handler = ConversationHandler(
         entry_points=[
