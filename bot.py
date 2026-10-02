@@ -40,6 +40,8 @@ load_dotenv()
 # ── Configuration ─────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
 MEDIA_UPLOAD_TOKEN = os.environ.get("MEDIA_UPLOAD_TOKEN")
+PRICING_SYNC_TOKEN = os.environ.get("PRICING_SYNC_TOKEN")
+ROUTING_TOKEN = os.environ.get("ROUTING_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "https://api.gapgpt.app/v1"
@@ -160,6 +162,7 @@ BTN_ADD_PHOTO = "🖼 افزودن با عکس"
 BTN_ADD_HELP = "ℹ️ راهنمای ثبت محصول"
 BTN_ADMIN_MANAGE = "👥 مدیریت ادمین‌ها"
 BTN_ADMIN_REPORT = "📊 گزارش فعالیت ادمین‌ها"
+BTN_ADMIN_ROUTING = 'مسئولیت فروش دسته‌ها'
 ADMIN_CATEGORIES = ["کفش", "کیف", "لباس", "ورزشی", "آرایشی بهداشتی", "اکسسوری", "دارو و سلامتی", "عطر و ادکلن"]
 BTN_SETTINGS = "⚙️ تنظیم قیمت"
 BTN_PRICE_VIEW = "💰 قیمت فعلی"
@@ -174,6 +177,7 @@ def main_menu(user_id: int) -> ReplyKeyboardMarkup:
         rows.append([BTN_QUICK_ADD])
         rows.append([BTN_ADD_HELP])
         if is_super_admin(user_id):
+            rows.append([BTN_ADMIN_ROUTING])
             rows.append([BTN_ADMIN_MANAGE, BTN_ADMIN_REPORT])
         rows.append([BTN_IMPORT])
         rows.append([BTN_SETTINGS])
@@ -383,6 +387,16 @@ def save_settings(settings: dict) -> None:
     import json
     with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
         json.dump(settings, file, ensure_ascii=False, indent=2)
+    if PRICING_SYNC_TOKEN:
+        try:
+            httpx.put(
+                API_BASE_URL.rstrip("/") + "/public/pricing",
+                headers={"X-Pricing-Token": PRICING_SYNC_TOKEN},
+                json=settings,
+                timeout=15,
+            ).raise_for_status()
+        except Exception:
+            logger.exception("Could not sync pricing settings to API")
 
 
 def calculate_toman(price_usd: float, weight_grams: float | None) -> float:
@@ -426,18 +440,18 @@ def summary_text(d: dict) -> str:
 
 
 async def call_api(
-    method: str, endpoint: str, data: Optional[dict] = None
+    method: str, endpoint: str, data: Optional[dict] = None, headers: Optional[dict] = None
 ) -> dict | list:
     async with httpx.AsyncClient() as client:
         url = f"{API_BASE_URL}{endpoint}"
         if method == "GET":
-            resp = await client.get(url, timeout=15)
+            resp = await client.get(url, headers=headers, timeout=15)
         elif method == "POST":
-            resp = await client.post(url, json=data, timeout=15)
+            resp = await client.post(url, json=data, headers=headers, timeout=15)
         elif method == "PUT":
-            resp = await client.put(url, json=data, timeout=15)
+            resp = await client.put(url, json=data, headers=headers, timeout=15)
         elif method == "DELETE":
-            resp = await client.delete(url, timeout=15)
+            resp = await client.delete(url, headers=headers, timeout=15)
         else:
             raise ValueError(f"Unknown method {method}")
         resp.raise_for_status()
@@ -1212,12 +1226,66 @@ async def receive_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_new_admin_username"] = True
     await update.message.reply_text("✅ Telegram ID ثبت شد: " + str(admin_id) + "\n\nیک username برای نمایش در پنل وارد کنید (مثلاً hamid_admin):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]))
 
+async def admin_routing_start(update, context):
+    if not is_super_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ فقط سوپرادمین دسترسی دارد.")
+        return
+    data = await call_api("GET", "/public/routing", headers={"X-Routing-Token": ROUTING_TOKEN})
+    mapping = data.get("categories", {})
+    config = load_admin_config()
+    default_id = data.get("default_admin_id")
+    default = admin_label(int(default_id), config) if str(default_id or "").isdigit() else "تنظیم نشده"
+    lines = ["🧭 مسئولیت فروش دسته‌ها", "", f"ادمین پیش‌فرض: {default}"]
+    buttons = [[InlineKeyboardButton("⭐ تغییر ادمین پیش‌فرض", callback_data="routing_default")]]
+    context.user_data["routing_categories"] = ADMIN_CATEGORIES
+    for i, category in enumerate(ADMIN_CATEGORIES):
+        assigned = mapping.get(category)
+        assigned_label = admin_label(int(assigned), config) if str(assigned or "").isdigit() else "تنظیم نشده"
+        lines.append(f"{category}: {assigned_label}")
+        buttons.append([InlineKeyboardButton("⚙️ " + category, callback_data=f"routing_cat:{i}")])
+    await update.effective_message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
+async def routing_category_callback(update, context):
+    q = update.callback_query
+    if not is_super_admin(q.from_user.id):
+        await q.answer("⛔ فقط سوپرادمین دسترسی دارد.", show_alert=True)
+        return
+    await q.answer()
+    if q.data == "routing_default":
+        context.user_data["routing_category"] = "default"
+    else:
+        context.user_data["routing_category"] = q.data.split(":", 1)[1]
+    ids = sorted(set(ADMIN_IDS) | set(SUPER_ADMIN_IDS) | {int(x) for x in load_admin_config() if str(x).isdigit()})
+    config = load_admin_config()
+    buttons = [[InlineKeyboardButton(admin_label(i, config), callback_data=f"routing_set:{i}")] for i in ids]
+    buttons.append([InlineKeyboardButton("❌ لغو", callback_data="cancel")])
+    await q.message.reply_text("ادمین مسئول را انتخاب کن:", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def routing_set_callback(update, context):
+    q = update.callback_query
+    if not is_super_admin(q.from_user.id):
+        await q.answer("⛔ فقط سوپرادمین دسترسی دارد.", show_alert=True)
+        return
+    await q.answer()
+    uid = int(q.data.split(":", 1)[1]); key = context.user_data.get("routing_category")
+    data = await call_api("GET", "/public/routing", headers={"X-Routing-Token": ROUTING_TOKEN})
+    if key == "default": data["default_admin_id"] = uid
+    else:
+        cats = data.setdefault("categories", {})
+        cats[ADMIN_CATEGORIES[int(key)]] = uid
+    await call_api("PUT", "/public/routing", data=data, headers={"X-Routing-Token": ROUTING_TOKEN})
+    await q.message.reply_text("✅ مسئول فروش ذخیره شد.", reply_markup=main_menu(q.from_user.id))
+
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
-    if text == BTN_LIST: await cmd_list(update, context)
+    if text == BTN_ADMIN_ROUTING: await admin_routing_start(update, context)
+    elif text == BTN_LIST: await cmd_list(update, context)
     elif text == BTN_SEARCH:
         context.user_data["awaiting_search"] = True
-        await update.message.reply_text("🔍 نام، دسته یا ویژگی محصول را بنویسید:", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "🔍 نام، دسته یا ویژگی محصول را بنویسید:",
+            reply_markup=main_menu(update.effective_user.id),
+        )
     elif text == BTN_IMPORT: await import_excel_start(update, context)
     elif text == BTN_PRICE_VIEW: await cmd_price_settings(update, context)
     elif text == BTN_ADD_HELP: await add_help(update, context)
@@ -1752,7 +1820,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg:
         await msg.reply_text(
-            "❌ عملیات لغو شد.", reply_markup=ReplyKeyboardRemove()
+            "❌ عملیات لغو شد.",
+            reply_markup=main_menu(update.effective_user.id),
         )
     return ConversationHandler.END
 
@@ -1763,7 +1832,8 @@ async def stage_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_message:
         await update.effective_message.reply_text(
             "⏰ زمان انتظار تمام شد. عملیات لغو شد.\n"
-            "برای شروع دوباره: /add"
+            "از منوی زیر عملیات بعدی را انتخاب کنید.",
+            reply_markup=main_menu(update.effective_user.id),
         )
     return ConversationHandler.END
 
@@ -2155,17 +2225,14 @@ def main():
         ],
         states={
             SET_USD_RATE: [
-                CommandHandler("start", restart_conversation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_usd_rate),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
             SET_SHIPPING: [
-                CommandHandler("start", restart_conversation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_shipping),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
             SET_MULTIPLIER: [
-                CommandHandler("start", restart_conversation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, settings_multiplier),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
@@ -2290,7 +2357,7 @@ def main():
     application.add_handler(CallbackQueryHandler(skip_admin_username, pattern=r"^admin_username_skip$"), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_username, block=False), group=-2)
     application.add_handler(
-        MessageHandler(filters.Regex(f"^(?:{BTN_ADMIN_MANAGE}|{BTN_ADMIN_REPORT})$"), menu_button),
+        MessageHandler(filters.Regex(f"^(?:{BTN_ADMIN_MANAGE}|{BTN_ADMIN_REPORT}|{BTN_ADMIN_ROUTING})$"), menu_button),
         group=-1,
     )
     application.add_handler(conv_handler)
@@ -2313,6 +2380,9 @@ def main():
     application.add_handler(CallbackQueryHandler(confirm_edit_callback, pattern=r"^confirm_edit$"))
     application.add_handler(CallbackQueryHandler(admin_edit_callback, pattern=r"^admin_edit:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_manage_callback, pattern=r"^admin_manage:\d+$"))
+    application.add_handler(CallbackQueryHandler(routing_category_callback, pattern=r"^routing_cat:\d+$"))
+    application.add_handler(CallbackQueryHandler(routing_set_callback, pattern=r"^routing_set:\d+$"))
+    application.add_handler(CallbackQueryHandler(routing_category_callback, pattern=r"^routing_default$"))
     application.add_handler(CallbackQueryHandler(admin_manage_back_callback, pattern=r"^admin_manage_back$"))
     application.add_handler(CallbackQueryHandler(admin_delete_callback, pattern=r"^admin_delete:\d+$"))
     application.add_handler(CallbackQueryHandler(admin_username_edit_callback, pattern=r"^admin_username_edit:\d+$"))

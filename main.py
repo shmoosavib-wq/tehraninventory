@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -34,9 +34,70 @@ ensure_schema()
 
 app = FastAPI(title="Tehran Inventory API", version="1.0.0")
 cors_origins = [x.strip() for x in os.environ.get("CORS_ORIGINS", "http://127.0.0.1:5500,http://localhost:5500").split(",") if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "X-Analytics-Token"])
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "X-Analytics-Token", "X-Pricing-Token", "X-Routing-Token"])
 RAILWAY_PHOTO_DIR = Path(os.environ.get("PHOTO_DIR", "/data/photos"))
 RAILWAY_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+ROUTING_FILE = Path(os.environ.get("ROUTING_FILE", "/data/routing.json"))
+DEFAULT_ROUTING = {"categories": {}, "default_admin_id": None}
+
+def load_routing() -> dict:
+    try:
+        with ROUTING_FILE.open("r", encoding="utf-8") as file:
+            values = json.load(file)
+        return {**DEFAULT_ROUTING, **values}
+    except (OSError, ValueError):
+        return DEFAULT_ROUTING.copy()
+
+def save_routing(values: dict) -> dict:
+    ROUTING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    merged = {**DEFAULT_ROUTING, **values}
+    with ROUTING_FILE.open("w", encoding="utf-8") as file:
+        json.dump(merged, file, ensure_ascii=False, indent=2)
+    return merged
+
+@app.get("/public/routing")
+def public_routing(x_routing_token: str | None = Header(default=None)):
+    expected = os.environ.get("ROUTING_TOKEN")
+    if not expected or x_routing_token != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return load_routing()
+
+@app.put("/public/routing")
+def update_public_routing(values: dict = Body(...), x_routing_token: str | None = Header(default=None)):
+    expected = os.environ.get("ROUTING_TOKEN")
+    if not expected or x_routing_token != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return save_routing(values)
+
+PRICING_FILE = Path(os.environ.get("PRICING_FILE", "/data/pricing.json"))
+DEFAULT_PRICING = {"usd_rate": 150000.0, "shipping_per_kg": 8000000.0, "multiplier": 1.5}
+
+def load_pricing() -> dict:
+    try:
+        with PRICING_FILE.open("r", encoding="utf-8") as file:
+            values = json.load(file)
+        return {**DEFAULT_PRICING, **values}
+    except (OSError, ValueError):
+        return DEFAULT_PRICING.copy()
+
+def save_pricing(values: dict) -> dict:
+    PRICING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    merged = {**DEFAULT_PRICING, **values}
+    with PRICING_FILE.open("w", encoding="utf-8") as file:
+        json.dump(merged, file, ensure_ascii=False, indent=2)
+    return merged
+
+@app.get("/public/pricing")
+def public_pricing():
+    return load_pricing()
+
+@app.put("/public/pricing")
+def update_public_pricing(values: dict = Body(...), x_pricing_token: str | None = Header(default=None)):
+    expected = os.environ.get("PRICING_SYNC_TOKEN")
+    if not expected or x_pricing_token != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return save_pricing(values)
+
 
 @app.get("/")
 def read_root():
