@@ -168,6 +168,9 @@ BTN_SETTINGS = "⚙️ تنظیم قیمت"
 BTN_PRICE_VIEW = "💰 قیمت فعلی"
 BTN_IMPORT = "📥 ورود اکسل"
 BTN_MANAGE = "🛠 مدیریت محصولات"
+BTN_BULK_DELETE = "🗑 حذف گروهی محصولات"
+BULK_DELETE_PAGE_SIZE = 8
+BULK_DELETE_MAX_ITEMS = 20
 
 
 def main_menu(user_id: int) -> ReplyKeyboardMarkup:
@@ -180,6 +183,7 @@ def main_menu(user_id: int) -> ReplyKeyboardMarkup:
             rows.append([BTN_ADMIN_ROUTING])
             rows.append([BTN_ADMIN_MANAGE, BTN_ADMIN_REPORT])
         rows.append([BTN_IMPORT])
+        rows.append([BTN_BULK_DELETE])
         rows.append([BTN_SETTINGS])
         rows.append([BTN_PRICE_VIEW])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -883,6 +887,332 @@ async def manage_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ برای دسته‌بندی‌های شما محصولی ثبت نشده است.")
 
 
+def _bulk_delete_products(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    return context.user_data.get("bulk_delete_products", [])
+
+
+def _bulk_delete_selected(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
+    return {int(value) for value in context.user_data.get("bulk_delete_selected", [])}
+
+
+def _clear_bulk_delete_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        "bulk_delete_products", "bulk_delete_selected", "bulk_delete_page",
+        "bulk_delete_category", "bulk_delete_categories",
+    ):
+        context.user_data.pop(key, None)
+
+
+def _bulk_delete_filtered_products(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    products = _bulk_delete_products(context)
+    category = context.user_data.get("bulk_delete_category")
+    if category is None:
+        return products
+    return [p for p in products if (p.get("category") or "سایر").strip() == category]
+
+
+def _bulk_delete_page_keyboard(context: ContextTypes.DEFAULT_TYPE, selected: set[int], page: int) -> InlineKeyboardMarkup:
+    products = _bulk_delete_filtered_products(context)
+    page_count = max(1, (len(products) + BULK_DELETE_PAGE_SIZE - 1) // BULK_DELETE_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * BULK_DELETE_PAGE_SIZE
+    current = products[start:start + BULK_DELETE_PAGE_SIZE]
+    rows = []
+    for product in current:
+        product_id = int(product["id"])
+        marker = "✅" if product_id in selected else "⬜"
+        name = str(product.get("name") or "بدون نام").replace("\n", " ")[:34]
+        rows.append([InlineKeyboardButton(
+            f"{marker} #{product_id} · {name}", callback_data=f"bulkdel:toggle:{product_id}"
+        )])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"bulkdel:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{page_count}", callback_data="bulkdel:noop"))
+    if page + 1 < page_count:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"bulkdel:page:{page + 1}"))
+    rows.append(nav)
+    categories = context.user_data.get("bulk_delete_categories", [])
+    filter_buttons = [InlineKeyboardButton(
+        f"{'✅ ' if context.user_data.get('bulk_delete_category') is None else ''}همه ({len(_bulk_delete_products(context))})",
+        callback_data="bulkdel:filter:-1",
+    )]
+    filter_buttons.extend(
+        InlineKeyboardButton(
+            f"{'✅ ' if context.user_data.get('bulk_delete_category') == category else ''}{category[:22]}",
+            callback_data=f"bulkdel:filter:{index}",
+        )
+        for index, category in enumerate(categories)
+    )
+    rows.extend([filter_buttons[i:i + 2] for i in range(0, len(filter_buttons), 2)])
+    rows.append([
+        InlineKeyboardButton("☑️ انتخاب این صفحه", callback_data="bulkdel:select_page"),
+        InlineKeyboardButton("پاک‌کردن صفحه", callback_data="bulkdel:clear_page"),
+    ])
+    rows.append([InlineKeyboardButton(
+        f"👀 بازبینی انتخاب‌ها ({len(selected)})", callback_data="bulkdel:review"
+    )])
+    rows.append([InlineKeyboardButton("لغو", callback_data="bulkdel:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _bulk_delete_page_text(context: ContextTypes.DEFAULT_TYPE, selected: set[int], page: int) -> str:
+    products = _bulk_delete_filtered_products(context)
+    page_count = max(1, (len(products) + BULK_DELETE_PAGE_SIZE - 1) // BULK_DELETE_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    category = context.user_data.get("bulk_delete_category") or "همهٔ دسته‌ها"
+    return (
+        "🗑 حذف گروهی محصولات\n\n"
+        f"دسته: {category}\n"
+        f"محصول در این فهرست: {len(products)} | انتخاب‌شده: {len(selected)}/{BULK_DELETE_MAX_ITEMS}\n"
+        f"صفحهٔ {page + 1} از {page_count}\n\n"
+        "برای انتخاب/لغو انتخاب، روی ردیف محصول بزنید. حذف تا مرحلهٔ تأیید نهایی انجام نمی‌شود."
+    )
+
+
+async def bulk_delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ این گزینه فقط برای ادمین است.")
+        return
+    context.user_data.clear()
+    try:
+        products = await call_api("GET", "/products")
+    except Exception:
+        logger.exception("Could not fetch products for bulk deletion")
+        await update.message.reply_text("❌ دریافت محصولات ناموفق بود؛ هیچ محصولی حذف نشد.")
+        return
+    products = [p for p in products if can_manage_product(user_id, p)]
+    products.sort(key=lambda p: int(p.get("id") or 0), reverse=True)
+    if not products:
+        await update.message.reply_text("📭 محصولی برای مدیریت در دسترس شما نیست.", reply_markup=main_menu(user_id))
+        return
+    context.user_data["bulk_delete_products"] = products
+    context.user_data["bulk_delete_selected"] = []
+    context.user_data["bulk_delete_page"] = 0
+    context.user_data["bulk_delete_category"] = None
+    context.user_data["bulk_delete_categories"] = sorted({
+        (p.get("category") or "سایر").strip() for p in products
+    })
+    await update.message.reply_text(
+        _bulk_delete_page_text(context, set(), 0),
+        reply_markup=_bulk_delete_page_keyboard(context, set(), 0),
+    )
+
+
+def _bulk_preview_line(product: dict) -> str:
+    photos = [p for p in (product.get("original_photo_path") or "").split("|") if p]
+    if product.get("telegram_file_id"):
+        photos.append("telegram")
+    name = str(product.get("name") or "بدون نام").replace("\n", " ")[:58]
+    category = str(product.get("category") or "سایر").replace("\n", " ")[:28]
+    return (
+        f"• #{product['id']} — {name}\n"
+        f"  دسته: {category} | قیمت: ${product.get('price_usd', '-')} | عکس: {len(photos)}"
+    )
+
+
+async def _bulk_delete_show_review(query, context: ContextTypes.DEFAULT_TYPE):
+    products = _bulk_delete_products(context)
+    selected = _bulk_delete_selected(context)
+    by_id = {int(p["id"]): p for p in products}
+    chosen = [by_id[i] for i in sorted(selected, reverse=True) if i in by_id]
+    if not chosen:
+        await query.edit_message_text(
+            "هنوز محصولی انتخاب نشده است.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به انتخاب", callback_data="bulkdel:back")], [InlineKeyboardButton("لغو", callback_data="bulkdel:cancel")]]),
+        )
+        return
+    text = (
+        f"👀 پیش‌نمایش حذف — {len(chosen)} محصول\n\n"
+        + "\n\n".join(_bulk_preview_line(p) for p in chosen)
+        + "\n\nاگر مورد اشتباهی انتخاب شده، دکمهٔ همان محصول را بزنید تا از فهرست حذف شود."
+    )
+    rows = [[InlineKeyboardButton(
+        f"➖ حذف از انتخاب: #{p['id']} · {str(p.get('name') or 'بدون نام')[:25]}",
+        callback_data=f"bulkdel:remove:{p['id']}"
+    )] for p in chosen]
+    rows.extend([
+        [InlineKeyboardButton("↩️ بازگشت به انتخاب", callback_data="bulkdel:back")],
+        [InlineKeyboardButton(f"ادامه به تأیید نهایی ({len(chosen)})", callback_data="bulkdel:confirm_screen")],
+        [InlineKeyboardButton("لغو", callback_data="bulkdel:cancel")],
+    ])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _bulk_delete_show_confirmation(query, context: ContextTypes.DEFAULT_TYPE):
+    products = _bulk_delete_products(context)
+    selected = _bulk_delete_selected(context)
+    by_id = {int(p["id"]): p for p in products}
+    chosen = [by_id[i] for i in sorted(selected, reverse=True) if i in by_id]
+    if not chosen:
+        await query.edit_message_text("انتخابی برای حذف وجود ندارد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="bulkdel:back")]]))
+        return
+    text = (
+        f"⚠️ تأیید نهایی حذف {len(chosen)} محصول\n\n"
+        + "\n".join(f"#{p['id']} · {str(p.get('name') or 'بدون نام')[:55]}" for p in chosen)
+        + "\n\nاین حذف دائمی است و قابل‌بازگشت نیست. فقط موارد همین فهرست حذف می‌شوند."
+    )
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🗑 بله، حذف {len(chosen)} محصول", callback_data="bulkdel:execute")],
+        [InlineKeyboardButton("↩️ بازگشت به پیش‌نمایش", callback_data="bulkdel:review")],
+        [InlineKeyboardButton("لغو", callback_data="bulkdel:cancel")],
+    ]))
+
+
+async def bulk_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("⛔ فقط ادمین دسترسی دارد.", show_alert=True)
+        return
+    if not context.user_data.get("bulk_delete_products"):
+        await query.answer("این عملیات منقضی شده؛ دوباره از منو شروع کنید.", show_alert=True)
+        return
+    action = query.data.split(":", 1)[1]
+    products = _bulk_delete_products(context)
+    selected = _bulk_delete_selected(context)
+    by_id = {int(p["id"]): p for p in products}
+    page = int(context.user_data.get("bulk_delete_page", 0))
+
+    if action.startswith("toggle:"):
+        product_id = int(action.split(":", 1)[1])
+        visible_ids = {int(p["id"]) for p in _bulk_delete_filtered_products(context)}
+        if product_id not in visible_ids or product_id not in by_id or not can_manage_product(query.from_user.id, by_id[product_id]):
+            await query.answer("دسترسی این محصول برای شما تأیید نشد.", show_alert=True)
+            return
+        if product_id not in selected and len(selected) >= BULK_DELETE_MAX_ITEMS:
+            await query.answer(f"در هر مرحله حداکثر {BULK_DELETE_MAX_ITEMS} محصول قابل انتخاب است.", show_alert=True)
+            return
+    await query.answer()
+
+    if action == "noop":
+        return
+    if action == "cancel":
+        _clear_bulk_delete_state(context)
+        await query.edit_message_text("عملیات حذف گروهی لغو شد؛ هیچ محصولی حذف نشد.")
+        return
+    if action.startswith("toggle:"):
+        product_id = int(action.split(":", 1)[1])
+        if product_id in selected:
+            selected.remove(product_id)
+        else:
+            selected.add(product_id)
+        context.user_data["bulk_delete_selected"] = sorted(selected)
+    elif action.startswith("page:"):
+        page = int(action.split(":", 1)[1])
+    elif action == "select_page":
+        visible_products = _bulk_delete_filtered_products(context)
+        visible = visible_products[page * BULK_DELETE_PAGE_SIZE:(page + 1) * BULK_DELETE_PAGE_SIZE]
+        for product in visible:
+            product_id = int(product["id"])
+            if product_id not in selected and len(selected) < BULK_DELETE_MAX_ITEMS:
+                selected.add(product_id)
+        context.user_data["bulk_delete_selected"] = sorted(selected)
+    elif action == "clear_page":
+        visible_products = _bulk_delete_filtered_products(context)
+        visible_ids = {int(p["id"]) for p in visible_products[page * BULK_DELETE_PAGE_SIZE:(page + 1) * BULK_DELETE_PAGE_SIZE]}
+        selected.difference_update(visible_ids)
+        context.user_data["bulk_delete_selected"] = sorted(selected)
+    elif action.startswith("filter:"):
+        filter_index = int(action.split(":", 1)[1])
+        categories = context.user_data.get("bulk_delete_categories", [])
+        if filter_index == -1:
+            context.user_data["bulk_delete_category"] = None
+        elif 0 <= filter_index < len(categories):
+            context.user_data["bulk_delete_category"] = categories[filter_index]
+        else:
+            await query.edit_message_text("این فیلتر دیگر معتبر نیست؛ عملیات را دوباره شروع کنید.")
+            return
+        page = 0
+    elif action == "review":
+        await _bulk_delete_show_review(query, context)
+        return
+    elif action.startswith("remove:"):
+        product_id = int(action.split(":", 1)[1])
+        selected.discard(product_id)
+        context.user_data["bulk_delete_selected"] = sorted(selected)
+        await _bulk_delete_show_review(query, context)
+        return
+    elif action == "back":
+        await query.edit_message_text(
+            _bulk_delete_page_text(context, selected, page),
+            reply_markup=_bulk_delete_page_keyboard(context, selected, page),
+        )
+        return
+    elif action == "confirm_screen":
+        await _bulk_delete_show_confirmation(query, context)
+        return
+    elif action == "execute":
+        if not selected:
+            await query.edit_message_text("انتخابی برای حذف وجود ندارد؛ هیچ محصولی حذف نشد.")
+            return
+        try:
+            latest = await call_api("GET", "/products")
+        except Exception:
+            logger.exception("Bulk delete preflight failed")
+            await query.edit_message_text("❌ بررسی نهایی محصولات ناموفق بود؛ هیچ محصولی حذف نشد. دوباره تلاش کنید.")
+            return
+        latest_by_id = {int(p["id"]): p for p in latest}
+        snapshot_by_id = {int(p["id"]): p for p in products}
+        invalid = []
+        changed = []
+        compared_fields = (
+            "name", "category", "price_usd", "weight_grams", "size", "location",
+            "description", "original_photo_path", "telegram_file_id",
+        )
+        for product_id in selected:
+            current = latest_by_id.get(product_id)
+            if current is None or not can_manage_product(query.from_user.id, current):
+                invalid.append(product_id)
+                continue
+            original = snapshot_by_id.get(product_id, {})
+            if any(original.get(field) != current.get(field) for field in compared_fields):
+                changed.append(product_id)
+        if invalid or changed:
+            _clear_bulk_delete_state(context)
+            parts = []
+            if invalid:
+                parts.append("دیگر موجود/مجاز نیستند: #" + ", #".join(map(str, sorted(invalid))))
+            if changed:
+                parts.append("بعد از پیش‌نمایش ویرایش شده‌اند: #" + ", #".join(map(str, sorted(changed))))
+            await query.edit_message_text(
+                "⚠️ " + "\n".join(parts)
+                + "\nبرای جلوگیری از حذف اشتباه، هیچ‌کدام حذف نشدند. فهرست را دوباره باز و بازبینی کنید."
+            )
+            return
+        await query.edit_message_text(f"⏳ در حال حذف {len(selected)} محصول؛ لطفاً صبر کنید…")
+        deleted, failed = [], []
+        for product_id in sorted(selected):
+            try:
+                await call_api("DELETE", f"/products/{product_id}")
+                deleted.append(product_id)
+            except Exception:
+                logger.exception("Bulk delete failed for product id=%s", product_id)
+                failed.append(product_id)
+                break
+        _clear_bulk_delete_state(context)
+        if failed:
+            remaining = sorted(selected.difference(deleted).difference(failed))
+            remaining_ids = ", ".join(f"#{pid}" for pid in [failed[0], *remaining])
+            await query.edit_message_text(
+                f"⚠️ {len(deleted)} محصول حذف شد، اما حذف در #{failed[0]} متوقف شد.\n"
+                f"محصولات حذف‌نشده: {remaining_ids}\n"
+                "لطفاً فهرست را دوباره بررسی کنید؛ حذف‌های موفق قابل‌بازگشت نیستند."
+            )
+        else:
+            await query.edit_message_text(f"✅ هر {len(deleted)} محصول انتخاب‌شده حذف شد.")
+        return
+
+    visible_products = _bulk_delete_filtered_products(context)
+    page_count = max(1, (len(visible_products) + BULK_DELETE_PAGE_SIZE - 1) // BULK_DELETE_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    context.user_data["bulk_delete_page"] = page
+    await query.edit_message_text(
+        _bulk_delete_page_text(context, selected, page),
+        reply_markup=_bulk_delete_page_keyboard(context, selected, page),
+    )
+
+
 async def manage_product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1377,6 +1707,7 @@ async def routing_set_callback(update, context):
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if text == BTN_ADMIN_ROUTING: await admin_routing_start(update, context)
+    elif text == BTN_BULK_DELETE: await bulk_delete_start(update, context)
     elif text == BTN_LIST: await cmd_list(update, context)
     elif text == BTN_SEARCH:
         context.user_data["awaiting_search"] = True
@@ -2457,10 +2788,11 @@ def main():
     # /start is a global escape hatch: it clears pending admin/product/settings flows.
     application.add_handler(CommandHandler("start", restart_conversation), group=-1)
     application.add_handler(CallbackQueryHandler(cancel, pattern=r"^cancel$"), group=-1)
+    application.add_handler(CallbackQueryHandler(bulk_delete_callback, pattern=r"^bulkdel:"), group=-1)
     application.add_handler(CallbackQueryHandler(skip_admin_username, pattern=r"^admin_username_skip$"), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_username, block=False), group=-2)
     application.add_handler(
-        MessageHandler(filters.Regex(f"^(?:{BTN_ADMIN_MANAGE}|{BTN_ADMIN_REPORT}|{BTN_ADMIN_ROUTING})$"), menu_button),
+        MessageHandler(filters.Regex(f"^(?:{BTN_ADMIN_MANAGE}|{BTN_ADMIN_REPORT}|{BTN_ADMIN_ROUTING}|{re.escape(BTN_BULK_DELETE)})$"), menu_button),
         group=-1,
     )
     application.add_handler(conv_handler)
