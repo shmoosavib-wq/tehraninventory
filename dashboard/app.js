@@ -180,9 +180,11 @@ async function loadAnalytics() {
     apiRequest("/analytics/products?days=" + days),
     apiRequest("/analytics/admins?days=" + days),
     apiRequest("/analytics/deletions?days=" + days + "&limit=200"),
-    apiRequest("/analytics/edits?days=" + days + "&limit=200"),
+    apiRequest("/analytics/edits?days=" + days + "&limit=200")
+      .then((payload) => ({ payload, error: null }))
+      .catch((error) => ({ payload: null, error })),
   ]);
-  const [summary, demand, products, admins, deletions, edits] = results;
+  const [summary, demand, products, admins, deletions, editsResult] = results;
   $("users").textContent = summary.unique_users ?? 0;
   $("searches").textContent = summary.searches ?? 0;
   $("views").textContent = summary.product_views ?? 0;
@@ -208,7 +210,12 @@ async function loadAnalytics() {
     )).join("")
     : "داده‌ای ثبت نشده";
   renderDeletionLog(deletions);
-  renderProductEditLog(edits);
+  if (editsResult.error) {
+    $("edit-count").textContent = "—";
+    $("edit-table").innerHTML = '<p class="empty-state">تاریخچهٔ ویرایش فعلاً از API دریافت نشد؛ سایر آمار در دسترس است.</p>';
+  } else {
+    renderProductEditLog(editsResult.payload);
+  }
   setStatus("آخرین بروزرسانی: همین حالا");
 }
 
