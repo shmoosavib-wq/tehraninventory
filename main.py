@@ -35,7 +35,7 @@ ensure_schema()
 
 app = FastAPI(title="Tehran Inventory API", version="1.0.0")
 cors_origins = [x.strip() for x in os.environ.get("CORS_ORIGINS", "http://127.0.0.1:5500,http://localhost:5500").split(",") if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "X-Analytics-Token", "X-Admin-API-Token", "X-Pricing-Token", "X-Routing-Token", "X-Media-Token", "X-Admin-ID", "X-Admin-Username", "X-Deletion-Batch-ID", "X-Deletion-Source"])
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "X-Analytics-Token", "X-Admin-API-Token", "X-Pricing-Token", "X-Routing-Token", "X-Media-Token", "X-Admin-ID", "X-Admin-Username", "X-Deletion-Batch-ID", "X-Deletion-Source", "X-Edit-Source"])
 RAILWAY_PHOTO_DIR = Path(os.environ.get("PHOTO_DIR", "/data/photos"))
 RAILWAY_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 ROUTING_FILE = Path(os.environ.get("ROUTING_FILE", "/data/routing.json"))
@@ -159,6 +159,9 @@ def update_product(
     product_id: int, 
     product_update: schemas.ProductUpdate, 
     db: Session = Depends(get_db),
+    x_admin_id: int | None = Header(default=None),
+    x_admin_username: str | None = Header(default=None),
+    x_edit_source: str | None = Header(default="api"),
     _auth=Depends(require_admin_api_token),
 ):
     db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
@@ -166,8 +169,22 @@ def update_product(
         raise HTTPException(status_code=404, detail="Product not found")
     
     update_data = product_update.dict(exclude_unset=True)
+    changed_fields = [
+        field for field, value in update_data.items()
+        if getattr(db_product, field) != value
+    ]
     for field, value in update_data.items():
         setattr(db_product, field, value)
+
+    if changed_fields:
+        db.add(models.ProductEditLog(
+            product_id=db_product.id,
+            product_name=db_product.name,
+            changed_fields_json=json.dumps(changed_fields, ensure_ascii=False),
+            edited_by_admin_id=x_admin_id,
+            edited_by_admin_username=(x_admin_username or "")[:64] or None,
+            source=(x_edit_source or "api")[:32],
+        ))
     
     db.commit()
     db.refresh(db_product)
@@ -286,17 +303,77 @@ def analytics_deletions(
         ],
     }
 
+@app.get("/analytics/edits")
+def analytics_edits(
+    days: int = 30,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_analytics_token),
+):
+    days = max(1, min(days, 365))
+    limit = max(1, min(limit, 1000))
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        db.query(models.ProductEditLog)
+        .filter(models.ProductEditLog.edited_at >= since)
+        .order_by(models.ProductEditLog.edited_at.desc(), models.ProductEditLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "days": days,
+        "edits": [
+            {
+                "id": row.id,
+                "product_id": row.product_id,
+                "product_name": row.product_name,
+                "changed_fields": json.loads(row.changed_fields_json or "[]"),
+                "edited_by_admin_id": row.edited_by_admin_id,
+                "edited_by_admin_username": row.edited_by_admin_username,
+                "source": row.source,
+                "edited_at": row.edited_at,
+            }
+            for row in rows
+        ],
+    }
+
 @app.get("/analytics/admins")
 def analytics_admins(days: int = 30, db: Session = Depends(get_db), _auth=Depends(require_analytics_token)):
     days = max(1, min(days, 90)); since = datetime.utcnow() - timedelta(days=days)
-    admin_ids = {r[0] for r in db.query(models.Product.created_by_admin_id).filter(models.Product.created_by_admin_id.isnot(None)).all()}
+    admin_ids = {
+        row[0] for row in db.query(models.Product.created_by_admin_id)
+        .filter(models.Product.created_by_admin_id.isnot(None)).all()
+    }
+    admin_ids.update(
+        row[0] for row in db.query(models.ProductEditLog.edited_by_admin_id)
+        .filter(models.ProductEditLog.edited_by_admin_id.isnot(None)).distinct().all()
+    )
     result = []
     for admin_id in sorted(admin_ids):
         created = db.query(models.Product).filter(models.Product.created_by_admin_id == admin_id, models.Product.created_at >= since).count()
+        edited = db.query(models.ProductEditLog).filter(models.ProductEditLog.edited_by_admin_id == admin_id, models.ProductEditLog.edited_at >= since).count()
         referred = db.query(models.ActivityEvent).filter(models.ActivityEvent.user_id == admin_id, models.ActivityEvent.event_type.in_(["order_referred", "click_order"]), models.ActivityEvent.created_at >= since).count()
         completed = db.query(models.ActivityEvent).filter(models.ActivityEvent.user_id == admin_id, models.ActivityEvent.event_type == "order_completed", models.ActivityEvent.created_at >= since).count()
         username = next((r[0] for r in db.query(models.Product.created_by_admin_username).filter(models.Product.created_by_admin_id == admin_id, models.Product.created_by_admin_username.isnot(None)).limit(1).all()), None)
-        result.append({"admin_id": admin_id, "username": username, "products_created": created, "referrals": referred, "completed_orders": completed})
+        if not username:
+            username = next((r[0] for r in db.query(models.ProductEditLog.edited_by_admin_username).filter(models.ProductEditLog.edited_by_admin_id == admin_id, models.ProductEditLog.edited_by_admin_username.isnot(None)).limit(1).all()), None)
+        result.append({"admin_id": admin_id, "username": username, "products_created": created, "products_edited": edited, "referrals": referred, "completed_orders": completed})
+
+    unassigned_edits = (
+        db.query(models.ProductEditLog.edited_by_admin_username, models.ProductEditLog.source, func.count(models.ProductEditLog.id))
+        .filter(models.ProductEditLog.edited_by_admin_id.is_(None), models.ProductEditLog.edited_at >= since)
+        .group_by(models.ProductEditLog.edited_by_admin_username, models.ProductEditLog.source)
+        .all()
+    )
+    result.extend({
+        "admin_id": None,
+        "username": username or ("پنل وب" if source == "dashboard" else source),
+        "products_created": 0,
+        "products_edited": edited,
+        "referrals": 0,
+        "completed_orders": 0,
+    } for username, source, edited in unassigned_edits)
+    result.sort(key=lambda item: (item["products_edited"], item["products_created"]), reverse=True)
     return {"days": days, "admins": result}
 
 @app.get("/analytics/products")

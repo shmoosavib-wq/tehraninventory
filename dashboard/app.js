@@ -44,6 +44,10 @@ async function apiRequest(path, options = {}) {
       && (path === "/products" || path.startsWith("/products/"))) {
       headers.set("X-Admin-API-Token", state.adminApiToken);
     }
+    if (options.method === "PUT" && path.startsWith("/products/")) {
+      headers.set("X-Edit-Source", "dashboard_local");
+      headers.set("X-Admin-Username", "پنل محلی");
+    }
     if (path === "/media/upload") headers.set("X-Media-Token", state.mediaToken);
   }
   const response = await fetch(apiUrl(path), {
@@ -75,6 +79,7 @@ function row(title, subtitle, value) {
 }
 
 function adminName(id, name) {
+  if (!id && name) return String(name).replace(/^@/, "");
   if (name) return "@" + name;
   if (knownAdminNames[String(id)]) return "@" + knownAdminNames[String(id)];
   return "شناسه " + (id || "-");
@@ -131,6 +136,41 @@ function renderDeletionLog(payload) {
     + "</tbody></table></div>";
 }
 
+function renderProductEditLog(payload) {
+  const items = payload.edits || [];
+  const target = $("edit-table");
+  $("edit-count").textContent = items.length + " مورد";
+  if (!items.length) {
+    target.innerHTML = '<p class="empty-state">در این بازه ویرایشی ثبت نشده است.</p>';
+    return;
+  }
+  const fieldNames = {
+    name: "نام", price_usd: "قیمت خرید", weight_grams: "وزن", size: "سایز",
+    category: "دسته", location: "موقعیت", description: "توضیحات",
+    ai_description: "توضیحات هوشمند", original_photo_path: "تصاویر",
+    telegram_file_id: "عکس تلگرام", telegram_link_1: "لینک تلگرام ۱",
+    telegram_link_2: "لینک تلگرام ۲", owner_admin_id: "مسئول محصول",
+  };
+  target.innerHTML = '<div class="table-scroll"><table><thead><tr>'
+    + "<th>زمان ویرایش</th><th>محصول</th><th>ادمین</th><th>محل</th><th>فیلدهای تغییرکرده</th>"
+    + "</tr></thead><tbody>"
+    + items.map((item) => {
+      const date = item.edited_at ? new Date(item.edited_at).toLocaleString("fa-IR") : "-";
+      const actor = item.edited_by_admin_id || item.edited_by_admin_username
+        ? adminName(item.edited_by_admin_id, item.edited_by_admin_username)
+        : item.source === "dashboard" ? "پنل وب" : item.source === "dashboard_local" ? "پنل محلی" : "نامشخص";
+      const source = item.source === "admin_bot" ? "بات ادمین"
+        : item.source === "dashboard" ? "پنل وب"
+          : item.source === "dashboard_local" ? "پنل محلی" : escapeHtml(item.source || "API");
+      const fields = (item.changed_fields || []).map((field) => fieldNames[field] || field);
+      return "<tr><td>" + escapeHtml(date) + "</td><td><b>"
+        + escapeHtml(item.product_name) + "</b><small>#" + Number(item.product_id)
+        + "</small></td><td>" + escapeHtml(actor) + "</td><td>" + source
+        + "</td><td>" + escapeHtml(fields.join("، ") || "-") + "</td></tr>";
+    }).join("")
+    + "</tbody></table></div>";
+}
+
 async function loadAnalytics() {
   const days = Number($("days").value || 30);
   setStatus("در حال دریافت آمار…");
@@ -140,8 +180,9 @@ async function loadAnalytics() {
     apiRequest("/analytics/products?days=" + days),
     apiRequest("/analytics/admins?days=" + days),
     apiRequest("/analytics/deletions?days=" + days + "&limit=200"),
+    apiRequest("/analytics/edits?days=" + days + "&limit=200"),
   ]);
-  const [summary, demand, products, admins, deletions] = results;
+  const [summary, demand, products, admins, deletions, edits] = results;
   $("users").textContent = summary.unique_users ?? 0;
   $("searches").textContent = summary.searches ?? 0;
   $("views").textContent = summary.product_views ?? 0;
@@ -161,11 +202,13 @@ async function loadAnalytics() {
   $("admin-list").innerHTML = admins.admins?.length
     ? admins.admins.map((item) => row(
       adminName(item.admin_id, item.username),
-      item.products_created + " محصول · " + item.referrals + " ارجاع",
+      item.products_created + " ثبت · " + (item.products_edited || 0)
+        + " ویرایش · " + item.referrals + " ارجاع",
       item.completed_orders + " فروش",
     )).join("")
     : "داده‌ای ثبت نشده";
   renderDeletionLog(deletions);
+  renderProductEditLog(edits);
   setStatus("آخرین بروزرسانی: همین حالا");
 }
 
@@ -184,6 +227,7 @@ function renderCategoryButtons() {
       + escapeHtml(category) + " (" + count + ")</button>";
   });
   $("category-list").innerHTML = markup;
+  $("catalog-count").textContent = catalogProducts.length + " محصول";
   $("category-list").querySelectorAll("[data-category]").forEach((button) => {
     button.addEventListener("click", () => {
       catalogCategory = button.dataset.category || "";
@@ -205,6 +249,7 @@ function renderCatalog() {
   const pageCount = Math.max(1, Math.ceil(filtered.length / 20));
   catalogPage = Math.min(catalogPage, pageCount - 1);
   const visible = filtered.slice(catalogPage * 20, catalogPage * 20 + 20);
+  $("catalog-count").textContent = filtered.length + " محصول";
   if (!visible.length) {
     $("catalog-table").innerHTML = '<p class="empty-state">محصولی در این دسته پیدا نشد.</p>';
     return;
@@ -222,7 +267,14 @@ function renderCatalog() {
     + " محصول</span><button type=\"button\" data-page=\"next\""
     + (catalogPage >= pageCount - 1 ? " disabled" : "") + ">بعدی</button></div>";
   $("catalog-table").querySelectorAll("[data-view-product]").forEach((button) => {
-    button.addEventListener("click", () => viewProduct(Number(button.dataset.viewProduct)));
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const previousScroll = window.scrollY;
+      viewProduct(Number(button.dataset.viewProduct)).finally(() => {
+        requestAnimationFrame(() => window.scrollTo(0, previousScroll));
+      });
+    });
   });
   $("catalog-table").querySelectorAll("[data-page]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -282,6 +334,7 @@ function showProduct(product) {
     )) + " (" + escapeHtml(product.created_by_admin_id || "-") + ")</b></div>"
     + "<p>" + escapeHtml(product.description || "توضیحی ثبت نشده است.")
     + '</p><div class="detail-actions"><button type="button" class="edit-btn" id="detail-edit">ویرایش محصول</button>'
+    + '<button type="button" class="danger-btn" id="detail-delete">حذف محصول</button>'
     + '<button type="button" class="secondary" id="detail-close">بستن</button></div>';
   if (!$("product-dialog").open) $("product-dialog").showModal();
   $("product-detail").querySelector(".modal-close").onclick = () => $("product-dialog").close();
@@ -290,6 +343,7 @@ function showProduct(product) {
     $("product-dialog").close();
     fillProductForm(product);
   };
+  $("detail-delete").onclick = () => deleteProduct(product);
   $("product-detail").querySelectorAll("[data-remove-photo]").forEach((button) => {
     button.addEventListener("click", () => removeProductPhoto(
       product, Number(button.dataset.removePhoto),
@@ -325,8 +379,25 @@ async function saveProduct(event) {
       body: JSON.stringify(product),
     });
     $("product-form-dialog").close();
+    const previousScroll = window.scrollY;
     await loadCatalog();
+    window.scrollTo(0, previousScroll);
     setStatus("محصول ذخیره شد.");
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function deleteProduct(product) {
+  if (!confirm("محصول «" + product.name + "» حذف شود؟ این کار قابل بازگشت نیست.")) return;
+  setStatus("در حال حذف محصول…");
+  try {
+    await apiRequest("/products/" + product.id, { method: "DELETE" });
+    $("product-dialog").close();
+    const previousScroll = window.scrollY;
+    await loadCatalog();
+    window.scrollTo(0, previousScroll);
+    setStatus("محصول حذف شد و در سوابق حذف ثبت شد.");
   } catch (error) {
     showError(error);
   }
@@ -412,39 +483,40 @@ async function removeProductPhoto(product, index) {
   }
 }
 
-function addDeletionNavigation() {
-  const nav = document.querySelector(".side nav");
-  if (nav && !document.getElementById("nav-deletions")) {
-    const link = document.createElement("a");
-    link.id = "nav-deletions";
-    link.href = "#deletions";
-    link.textContent = "سوابق حذف";
-    nav.append(link);
-  }
-  const catalog = $("catalog");
-  if (catalog && !$("deletions")) {
-    catalog.insertAdjacentHTML("afterend",
-      '<section id="deletions" class="panel deletion-panel"><div class="panel-head">'
-      + "<div><h2>سوابق حذف محصولات</h2><p>حذف‌های انجام‌شده از بات ادمین و پنل وب، همراه با نام ادمین و شناسه گروهی</p></div>"
-      + '<span id="deletion-count" class="deletion-count">—</span></div><div id="deletion-table">'
-      + '<p class="empty-state">در حال دریافت سوابق…</p></div></section>');
-  }
+function applyCurrentPage() {
+  const routeIds = new Set(["overview", "demand", "products", "admins", "admin-edits", "deletions"]);
+  let route = location.hash.slice(1) || "overview";
+  if (!routeIds.has(route)) route = "overview";
+  const isProductPage = route === "products";
+  $("overview-page").hidden = isProductPage;
+  $("products-page").hidden = !isProductPage;
+  document.querySelectorAll(".side nav [data-route]").forEach((link) => {
+    link.classList.toggle("active", link.dataset.route === route);
+  });
+  requestAnimationFrame(() => {
+    if (route === "overview" || isProductPage) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    document.getElementById(route)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
 function addLogoutButton() {
-  if (LOCAL_MODE || $("logout")) return;
-  const actions = document.querySelector("header .actions");
-  if (!actions) return;
-  const button = document.createElement("button");
-  button.id = "logout";
-  button.type = "button";
-  button.textContent = "خروج";
-  button.className = "secondary";
-  button.onclick = async () => {
-    await fetch("/api/auth", { method: "DELETE", credentials: "same-origin" });
-    openLogin("برای ادامه دوباره وارد شوید.");
-  };
-  actions.append(button);
+  if (LOCAL_MODE) return;
+  document.querySelectorAll("header .actions").forEach((actions) => {
+    if (actions.querySelector("[data-logout]")) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.logout = "true";
+    button.textContent = "خروج";
+    button.className = "secondary";
+    button.onclick = async () => {
+      await fetch("/api/auth", { method: "DELETE", credentials: "same-origin" });
+      openLogin("برای ادامه دوباره وارد شوید.");
+    };
+    actions.append(button);
+  });
 }
 
 function configureSetupDialog() {
@@ -525,8 +597,9 @@ async function loadAll() {
 }
 
 async function initialize() {
-  addDeletionNavigation();
   configureSetupDialog();
+  window.addEventListener("hashchange", applyCurrentPage);
+  applyCurrentPage();
   $("refresh").addEventListener("click", loadAll);
   $("days").addEventListener("change", loadAll);
   $("catalog-search").addEventListener("input", () => {

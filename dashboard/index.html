@@ -7,14 +7,28 @@
   <link rel="stylesheet" href="dashboard.css">
 </head>
 <body>
-  <aside class="side"><div class="logo"><i>E</i><b>الیکاشاپ</b></div><nav><a class="active" href="#overview">نمای کلی</a><a href="#demand">تقاضای مشتری</a><a href="#products">محصولات</a><a href="#admins">ادمین‌ها</a></nav><small>داشبورد سوپر ادمین<br>نسخه آزمایشی</small></aside>
+  <aside class="side"><div class="logo"><i>E</i><b>الیکاشاپ</b></div><nav>
+    <a class="active" data-route="overview" href="#overview">نمای کلی</a>
+    <a data-route="demand" href="#demand">تقاضای مشتری</a>
+    <a data-route="products" href="#products">مدیریت محصولات</a>
+    <a data-route="admins" href="#admins">ادمین‌ها</a>
+    <a data-route="admin-edits" href="#admin-edits">ویرایش‌های محصولات</a>
+    <a data-route="deletions" href="#deletions">سوابق حذف</a>
+  </nav><small>داشبورد مدیریت<br>الیکاشاپ</small></aside>
   <main>
-    <header><div><em>مرکز تصمیم‌گیری</em><h1>سلام، حمید 👋</h1><p>تصویر زنده‌ای از رفتار مشتری و عملکرد موجودی</p></div><div class="actions"><select id="days"><option value="7">۷ روز اخیر</option><option value="30" selected>۳۰ روز اخیر</option><option value="90">۹۰ روز اخیر</option></select><button id="refresh">↻ بروزرسانی</button></div></header>
-    <section class="kpis" id="overview"><article><span>کاربر یکتا</span><strong id="users">—</strong><small>در بازه انتخابی</small></article><article><span>جستجوها</span><strong id="searches">—</strong><small>تقاضای ثبت‌شده</small></article><article><span>مشاهده محصول</span><strong id="views">—</strong><small>تعامل با کاتالوگ</small></article><article><span>نرخ تبدیل</span><strong id="conversion">—</strong><small>جستجو تا خرید</small></article></section>
-    <section class="cols"><article class="panel"><h2>قیف رفتار مشتری</h2><p>از جستجو تا سفارش تکمیل‌شده</p><div class="funnel"><b><i id="f-search">۰</i><small>جستجو</small></b><b><i id="f-view">۰</i><small>مشاهده</small></b><b><i id="f-click">۰</i><small>کلیک سفارش</small></b><b><i id="f-order">۰</i><small>خرید</small></b></div></article><article class="panel"><h2>تقاضاهای داغ</h2><p>عبارت‌هایی که مشتری‌ها دنبال کرده‌اند</p><div id="demand-list" class="rows">در حال دریافت…</div></article></section>
-    <section id="demand" class="panel"><h2>تحلیل تقاضا</h2><p>برای تصمیم خرید و تأمین موجودی</p><div id="demand-table"></div></section>
-    <section class="cols"><article id="products" class="panel"><h2>محصولات پربازدید</h2><p>بیشترین توجه مشتری</p><div id="product-list" class="rows">در حال دریافت…</div></article><article id="admins" class="panel"><h2>عملکرد ادمین‌ها</h2><p>ثبت محصول و ارجاع سفارش</p><div id="admin-list" class="rows">در حال دریافت…</div></article></section>
-    <section id="catalog" class="panel"><div class="panel-head"><div><h2>مدیریت همه محصولات</h2><p>مشاهده، افزودن و ویرایش موجودی</p></div><button id="add-product">＋ افزودن محصول</button></div><div id="category-list" class="category-list"></div><input id="catalog-search" class="catalog-search" placeholder="جستجوی نام، دسته یا موقعیت…"><div id="catalog-table" class="table-scroll">در حال دریافت…</div></section>
+    <div id="overview-page" class="page-view">
+      <header><div><em>مرکز تصمیم‌گیری</em><h1>سلام، حمید 👋</h1><p>تصویر زنده‌ای از رفتار مشتری و عملکرد موجودی</p></div><div class="actions"><select id="days"><option value="7">۷ روز اخیر</option><option value="30" selected>۳۰ روز اخیر</option><option value="90">۹۰ روز اخیر</option></select><button id="refresh">↻ بروزرسانی</button></div></header>
+      <section class="kpis" id="overview"><article><span>کاربر یکتا</span><strong id="users">—</strong><small>در بازه انتخابی</small></article><article><span>جستجوها</span><strong id="searches">—</strong><small>تقاضای ثبت‌شده</small></article><article><span>مشاهده محصول</span><strong id="views">—</strong><small>تعامل با کاتالوگ</small></article><article><span>نرخ تبدیل</span><strong id="conversion">—</strong><small>جستجو تا خرید</small></article></section>
+      <section class="cols"><article class="panel"><h2>قیف رفتار مشتری</h2><p>از جستجو تا سفارش تکمیل‌شده</p><div class="funnel"><b><i id="f-search">۰</i><small>جستجو</small></b><b><i id="f-view">۰</i><small>مشاهده</small></b><b><i id="f-click">۰</i><small>کلیک سفارش</small></b><b><i id="f-order">۰</i><small>خرید</small></b></div></article><article class="panel"><h2>تقاضاهای داغ</h2><p>عبارت‌هایی که مشتری‌ها دنبال کرده‌اند</p><div id="demand-list" class="rows">در حال دریافت…</div></article></section>
+      <section id="demand" class="panel"><h2>تحلیل تقاضا</h2><p>برای تصمیم خرید و تأمین موجودی</p><div id="demand-table"></div></section>
+      <section class="cols"><article id="top-products" class="panel"><h2>محصولات پربازدید</h2><p>بیشترین توجه مشتری</p><div id="product-list" class="rows">در حال دریافت…</div></article><article id="admins" class="panel"><h2>عملکرد ادمین‌ها</h2><p>ثبت محصول، ویرایش، ارجاع و فروش در بازه انتخابی</p><div id="admin-list" class="rows">در حال دریافت…</div></article></section>
+      <section id="admin-edits" class="panel"><div class="panel-head"><div><h2>آخرین ویرایش‌های محصولات</h2><p>تاریخچهٔ تغییرات ثبت‌شده توسط بات و پنل وب</p></div><span id="edit-count" class="deletion-count">—</span></div><div id="edit-table"><p class="empty-state">در حال دریافت ویرایش‌ها…</p></div></section>
+      <section id="deletions" class="panel deletion-panel"><div class="panel-head"><div><h2>سوابق حذف محصولات</h2><p>حذف‌های انجام‌شده از بات ادمین و پنل وب</p></div><span id="deletion-count" class="deletion-count">—</span></div><div id="deletion-table"><p class="empty-state">در حال دریافت سوابق…</p></div></section>
+    </div>
+    <div id="products-page" class="page-view" hidden>
+      <header><div><em>موجودی فروشگاه</em><h1>مدیریت محصولات</h1><p>دسته‌بندی، جستجو، جزئیات و ویرایش کاتالوگ</p></div><div class="actions"><button id="add-product">＋ افزودن محصول</button></div></header>
+      <section id="catalog" class="panel"><div class="panel-head"><div><h2>همهٔ محصولات</h2><p>برای دیدن عکس‌ها، ویرایش یا حذف، محصول را باز کن.</p></div><span id="catalog-count" class="deletion-count">—</span></div><div id="category-list" class="category-list"></div><input id="catalog-search" class="catalog-search" placeholder="جستجوی نام، دسته یا موقعیت…"><div id="catalog-table" class="table-scroll">در حال دریافت…</div></section>
+    </div>
     <footer>وضعیت: <span id="status">آماده</span></footer>
   </main>
   <dialog id="setup"><form method="dialog"><h2>اتصال داشبورد</h2><p>توکن فقط تا زمان باز بودن همین تب در حافظه می‌ماند.</p><label>آدرس API<input id="api-url" value="http://127.0.0.1:8000"></label><label>توکن آنالیتیکس<input id="api-token" type="password"></label><label>توکن آپلود عکس<input id="media-token" type="password"></label><button>اتصال</button></form></dialog>

@@ -531,6 +531,16 @@ def deletion_audit_headers(user, batch_id: str | None = None) -> dict[str, str]:
     return headers
 
 
+def product_edit_audit_headers(user, source: str = "admin_bot") -> dict[str, str]:
+    headers = {"X-Edit-Source": source}
+    if getattr(user, "id", None) is not None:
+        headers["X-Admin-ID"] = str(user.id)
+    username = getattr(user, "username", None) or getattr(user, "full_name", None)
+    if username:
+        headers["X-Admin-Username"] = str(username)[:64]
+    return headers
+
+
 async def track_event(event_type: str, user_id: int | None = None, product_id: int | None = None, search_text: str | None = None, category: str | None = None, price_min: float | None = None, price_max: float | None = None, metadata: dict | None = None):
     payload = {"event_type": event_type, "user_id": user_id, "product_id": product_id, "search_text": search_text, "category": category, "price_min": price_min, "price_max": price_max, "metadata": metadata}
     payload = {k: v for k, v in payload.items() if v is not None}
@@ -1466,7 +1476,12 @@ async def confirm_edit_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not product_id or not field or value is None:
         await query.message.reply_text("❌ ویرایش منقضی شده است.")
         return ConversationHandler.END
-    await call_api("PUT", f"/products/{product_id}", data={field: value})
+    await call_api(
+        "PUT",
+        f"/products/{product_id}",
+        data={field: value},
+        headers=product_edit_audit_headers(query.from_user),
+    )
     await query.message.reply_text("✅ تغییر با موفقیت ذخیره شد.", reply_markup=main_menu(query.from_user.id))
     return ConversationHandler.END
 
@@ -1498,6 +1513,7 @@ async def finish_manage_photos(update: Update, context: ContextTypes.DEFAULT_TYP
             "PUT",
             f"/products/{product_id}",
             data={"original_photo_path": "|".join(existing + new_paths)},
+            headers=product_edit_audit_headers(query.from_user),
         )
     context.user_data.pop("photo_product_id", None)
     context.user_data.pop("photo_paths", None)
@@ -1522,6 +1538,7 @@ async def remove_photo_callback(update: Update, context: ContextTypes.DEFAULT_TY
         "PUT",
         f"/products/{product_id}",
         data={"original_photo_path": "|".join(paths)},
+        headers=product_edit_audit_headers(query.from_user),
     )
     keyboard = [
         [InlineKeyboardButton(

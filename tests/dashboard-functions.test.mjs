@@ -129,6 +129,42 @@ test("product write proxy injects the separate server-only admin API token", asy
   }
 });
 
+test("dashboard product edits carry an audit source and configured editor label", async () => {
+  const cookie = "elica_dashboard_session="
+    + createDashboardSession(process.env.DASHBOARD_SESSION_SECRET);
+  const originalFetch = globalThis.fetch;
+  process.env.DASHBOARD_ADMIN_LABEL = "dashboard-editor";
+  let forwardedHeaders;
+  globalThis.fetch = async (_url, options) => {
+    forwardedHeaders = options.headers;
+    return new Response('{"id":1}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const response = await proxy.fetch(new Request(
+      "https://panel.example.test/api/proxy?path=%2Fproducts%2F1",
+      {
+        method: "PUT",
+        headers: {
+          cookie,
+          origin: "https://panel.example.test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ price_usd: 12 }),
+      },
+    ));
+    assert.equal(response.status, 200);
+    assert.equal(forwardedHeaders.get("X-Admin-API-Token"), "test-admin-api-secret");
+    assert.equal(forwardedHeaders.get("X-Edit-Source"), "dashboard");
+    assert.equal(forwardedHeaders.get("X-Admin-Username"), "dashboard-editor");
+  } finally {
+    delete process.env.DASHBOARD_ADMIN_LABEL;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("photo upload proxy injects media token without exposing it to the browser", async () => {
   const cookie = "elica_dashboard_session="
     + createDashboardSession(process.env.DASHBOARD_SESSION_SECRET);

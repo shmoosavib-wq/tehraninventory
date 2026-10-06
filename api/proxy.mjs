@@ -15,7 +15,7 @@ function json(data, status = 200) {
 
 function allowedPath(path, method) {
   if (["/analytics/summary", "/analytics/demand", "/analytics/products",
-    "/analytics/admins", "/analytics/deletions"].includes(path)) {
+    "/analytics/admins", "/analytics/deletions", "/analytics/edits"].includes(path)) {
     return method === "GET";
   }
   if (path === "/products") return method === "GET" || method === "POST";
@@ -122,6 +122,12 @@ export default {
     }
     if (request.method === "DELETE") {
       headers.set("X-Deletion-Source", "dashboard");
+      if (process.env.DASHBOARD_ADMIN_LABEL) {
+        headers.set("X-Admin-Username", process.env.DASHBOARD_ADMIN_LABEL.replace(/^@/, ""));
+      }
+    }
+    if (request.method === "PUT" && /^\/products\/[1-9]\d*$/.test(path)) {
+      headers.set("X-Edit-Source", "dashboard");
       if (process.env.DASHBOARD_ADMIN_LABEL) {
         headers.set("X-Admin-Username", process.env.DASHBOARD_ADMIN_LABEL.replace(/^@/, ""));
       }
