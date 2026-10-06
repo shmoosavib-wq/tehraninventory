@@ -20,6 +20,6 @@
   <dialog id="setup"><form method="dialog"><h2>اتصال داشبورد</h2><p>توکن فقط تا زمان باز بودن همین تب در حافظه می‌ماند.</p><label>آدرس API<input id="api-url" value="http://127.0.0.1:8000"></label><label>توکن آنالیتیکس<input id="api-token" type="password"></label><label>توکن آپلود عکس<input id="media-token" type="password"></label><button>اتصال</button></form></dialog>
   <dialog id="product-dialog"><div id="product-detail"></div></dialog>
   <dialog id="product-form-dialog"><button class="modal-close" onclick="document.getElementById('product-form-dialog').close()">×</button><h2 id="form-title">افزودن محصول</h2><form id="product-form"><input type="hidden" id="form-id"><label>نام محصول<input id="form-name" required></label><div class="form-grid"><label>قیمت دلار<input id="form-price" type="number" step="0.01" required></label><label>وزن (گرم)<input id="form-weight" type="number" step="0.1"></label><label>سایز<input id="form-size"></label><label>دسته‌بندی<input id="form-category"></label><label>موقعیت<input id="form-location" value="تهران"></label></div><label>توضیحات<textarea id="form-description"></textarea></label><div class="form-actions"><button type="button" class="secondary" onclick="document.getElementById('product-form-dialog').close()">انصراف</button><button type="submit">ذخیره محصول</button></div></form></dialog>
-  <script src="dashboard.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

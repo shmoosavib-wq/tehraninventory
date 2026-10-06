@@ -44,3 +44,18 @@ class ActivityEvent(Base):
     price_max = Column(Float, nullable=True)
     metadata_json = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ProductDeletionLog(Base):
+    __tablename__ = "product_deletion_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, nullable=False, index=True)
+    product_name = Column(String, nullable=False)
+    category = Column(String(100), nullable=True, index=True)
+    price_usd = Column(Float, nullable=True)
+    deleted_by_admin_id = Column(Integer, nullable=True, index=True)
+    deleted_by_admin_username = Column(String(64), nullable=True)
+    source = Column(String(32), nullable=False, default="api")
+    batch_id = Column(String(64), nullable=True, index=True)
+    deleted_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

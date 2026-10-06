@@ -11,6 +11,7 @@ import logging
 import re
 import base64
 import json
+import uuid
 from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import quote
@@ -40,6 +41,7 @@ load_dotenv()
 # ── Configuration ─────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000")
 MEDIA_UPLOAD_TOKEN = os.environ.get("MEDIA_UPLOAD_TOKEN")
+ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN")
 PRICING_SYNC_TOKEN = os.environ.get("PRICING_SYNC_TOKEN")
 ROUTING_TOKEN = os.environ.get("ROUTING_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -493,6 +495,15 @@ def summary_text(d: dict) -> str:
 async def call_api(
     method: str, endpoint: str, data: Optional[dict] = None, headers: Optional[dict] = None
 ) -> dict | list:
+    request_headers = dict(headers or {})
+    if endpoint == "/products" or endpoint.startswith("/products/"):
+        if method in {"POST", "PUT", "DELETE"}:
+            if not ADMIN_API_TOKEN:
+                raise RuntimeError(
+                    "ADMIN_API_TOKEN is required for product changes; set it in the bot environment."
+                )
+            request_headers["X-Admin-API-Token"] = ADMIN_API_TOKEN
+    headers = request_headers or None
     async with httpx.AsyncClient() as client:
         url = f"{API_BASE_URL}{endpoint}"
         if method == "GET":
@@ -507,6 +518,17 @@ async def call_api(
             raise ValueError(f"Unknown method {method}")
         resp.raise_for_status()
         return resp.json()
+
+
+def deletion_audit_headers(user, batch_id: str | None = None) -> dict[str, str]:
+    headers = {"X-Deletion-Source": "admin_bot"}
+    if getattr(user, "id", None) is not None:
+        headers["X-Admin-ID"] = str(user.id)
+    if getattr(user, "username", None):
+        headers["X-Admin-Username"] = str(user.username)[:64]
+    if batch_id:
+        headers["X-Deletion-Batch-ID"] = batch_id
+    return headers
 
 
 async def track_event(event_type: str, user_id: int | None = None, product_id: int | None = None, search_text: str | None = None, category: str | None = None, price_min: float | None = None, price_max: float | None = None, metadata: dict | None = None):
@@ -1302,9 +1324,14 @@ async def bulk_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"⏳ در حال حذف {len(selected)} محصول؛ لطفاً صبر کنید…")
         deleted, failed = [], []
         total = len(selected)
+        batch_id = str(uuid.uuid4())
         for product_id in sorted(selected):
             try:
-                await call_api("DELETE", f"/products/{product_id}")
+                await call_api(
+                    "DELETE",
+                    f"/products/{product_id}",
+                    headers=deletion_audit_headers(query.from_user, batch_id),
+                )
                 deleted.append(product_id)
                 if len(deleted) % 25 == 0 and len(deleted) < total:
                     try:
@@ -1351,7 +1378,11 @@ async def manage_product_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.message.reply_text("⛔ شما به این دسته‌بندی دسترسی ندارید.")
         return
     if action == "delete_product":
-        await call_api("DELETE", f"/products/{product_id}")
+        await call_api(
+            "DELETE",
+            f"/products/{product_id}",
+            headers=deletion_audit_headers(query.from_user),
+        )
         await query.message.reply_text("✅ محصول حذف شد.")
         return
     if action == "edit_product":
@@ -2615,7 +2646,11 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await call_api("DELETE", f"/products/{pid}")
+        await call_api(
+            "DELETE",
+            f"/products/{pid}",
+            headers=deletion_audit_headers(update.effective_user),
+        )
         await update.message.reply_text(f"✅ محصول {pid} حذف شد.")
     except Exception as exc:
         logger.error("Error deleting product: %s", exc)

@@ -263,7 +263,11 @@ venv\Scripts\python.exe customer_bot.py
 - تغییرات کد: تست محلی، `py_compile`، بررسی `git diff --check`، سپس commit/push و بررسی Logs پس از Deploy.
 - فایل‌های backup و import محلی را بدون نیاز وارد commit نکنید؛ فقط فایل‌های مرتبط با تغییر را stage کنید.
 
-## ۸. دستورات بررسی کد در ویندوز
+## ۸. استقرار داشبورد مدیریت در Vercel
+
+داشبورد وب از پوشهٔ dashboard/ منتشر می‌شود و Functionهای ورود و پروکسی در پوشهٔ api/ قرار دارند. تنظیمات ریشهٔ پروژه، متغیرهای محیطی Vercel/Railway، ورود امن، بخش سوابق حذف و تست پس از استقرار در [VERCEL_DASHBOARD_DEPLOY.md](VERCEL_DASHBOARD_DEPLOY.md) آمده است. در Vercel، Root Directory باید ریشهٔ مخزن باشد، نه dashboard/.
+
+## ۹. دستورات بررسی کد در ویندوز
 
 ```powershell
 cd C:\projects\TEHRAN-INVENTORY

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
 import os
+import hmac
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text, func, case
 from datetime import datetime, timedelta
@@ -34,7 +35,7 @@ ensure_schema()
 
 app = FastAPI(title="Tehran Inventory API", version="1.0.0")
 cors_origins = [x.strip() for x in os.environ.get("CORS_ORIGINS", "http://127.0.0.1:5500,http://localhost:5500").split(",") if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "X-Analytics-Token", "X-Pricing-Token", "X-Routing-Token"])
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "X-Analytics-Token", "X-Admin-API-Token", "X-Pricing-Token", "X-Routing-Token", "X-Media-Token", "X-Admin-ID", "X-Admin-Username", "X-Deletion-Batch-ID", "X-Deletion-Source"])
 RAILWAY_PHOTO_DIR = Path(os.environ.get("PHOTO_DIR", "/data/photos"))
 RAILWAY_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 ROUTING_FILE = Path(os.environ.get("ROUTING_FILE", "/data/routing.json"))
@@ -136,8 +137,17 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Product not found")
     return product
 
+def require_admin_api_token(x_admin_api_token: str | None = Header(default=None)):
+    expected = os.environ.get("ADMIN_API_TOKEN")
+    if not expected or not x_admin_api_token or not hmac.compare_digest(x_admin_api_token, expected):
+        raise HTTPException(status_code=401, detail="Admin API authorization required")
+
 @app.post("/products", response_model=schemas.ProductResponse)
-def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)):
+def create_product(
+    product: schemas.ProductCreate,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_admin_api_token),
+):
     db_product = models.Product(**product.dict())
     db.add(db_product)
     db.commit()
@@ -148,7 +158,8 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
 def update_product(
     product_id: int, 
     product_update: schemas.ProductUpdate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _auth=Depends(require_admin_api_token),
 ):
     db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not db_product:
@@ -163,14 +174,33 @@ def update_product(
     return db_product
 
 @app.delete("/products/{product_id}")
-def delete_product(product_id: int, db: Session = Depends(get_db)):
+def delete_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    x_admin_id: int | None = Header(default=None),
+    x_admin_username: str | None = Header(default=None),
+    x_deletion_batch_id: str | None = Header(default=None),
+    x_deletion_source: str | None = Header(default="api"),
+    _auth=Depends(require_admin_api_token),
+):
     db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
-    
+
+    audit_row = models.ProductDeletionLog(
+        product_id=db_product.id,
+        product_name=db_product.name,
+        category=db_product.category,
+        price_usd=db_product.price_usd,
+        deleted_by_admin_id=x_admin_id,
+        deleted_by_admin_username=(x_admin_username or "")[:64] or None,
+        source=(x_deletion_source or "api")[:32],
+        batch_id=(x_deletion_batch_id or "")[:64] or None,
+    )
+    db.add(audit_row)
     db.delete(db_product)
     db.commit()
-    return {"message": "Product deleted"}
+    return {"message": "Product deleted", "deletion_log_id": audit_row.id}
 
 
 @app.post("/analytics/events", response_model=schemas.ActivityEventResponse)
@@ -181,15 +211,29 @@ def create_activity_event(event: schemas.ActivityEventCreate, db: Session = Depe
     row = models.ActivityEvent(user_id=event.user_id, event_type=event.event_type, product_id=event.product_id, search_text=(event.search_text or "")[:255] or None, category=event.category, price_min=event.price_min, price_max=event.price_max, metadata_json=json.dumps(event.metadata, ensure_ascii=False) if event.metadata else None)
     db.add(row); db.commit(); db.refresh(row); return row
 
+def require_analytics_token(x_analytics_token: str | None = Header(default=None)):
+    expected = os.environ.get("ANALYTICS_TOKEN")
+    if not expected or x_analytics_token != expected:
+        raise HTTPException(status_code=401, detail="Analytics authorization required")
+
 @app.get("/analytics/summary")
-def analytics_summary(days: int = 7, db: Session = Depends(get_db)):
+def analytics_summary(
+    days: int = 7,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_analytics_token),
+):
     days=max(1,min(days,90)); since=datetime.utcnow()-timedelta(days=days); q=db.query(models.ActivityEvent).filter(models.ActivityEvent.created_at>=since)
     users=q.with_entities(func.count(func.distinct(models.ActivityEvent.user_id))).scalar() or 0
     searches=q.filter(models.ActivityEvent.event_type=="search").count(); views=q.filter(models.ActivityEvent.event_type=="view_product").count(); clicks=q.filter(models.ActivityEvent.event_type=="click_order").count(); completed=q.filter(models.ActivityEvent.event_type=="order_completed").count()
     return {"days":days,"unique_users":users,"searches":searches,"product_views":views,"order_clicks":clicks,"completed_orders":completed,"conversion_rate":round(completed/searches*100,2) if searches else 0}
 
 @app.get("/analytics/demand")
-def analytics_demand(days: int = 30, limit: int = 20, db: Session = Depends(get_db)):
+def analytics_demand(
+    days: int = 30,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_analytics_token),
+):
     since = datetime.utcnow() - timedelta(days=max(1, min(days, 90))); limit = max(1, min(limit, 100))
     def norm(value):
         value = (value or "").strip().lower().replace("ي", "ی").replace("ك", "ک").replace("ۀ", "ه")
@@ -206,11 +250,41 @@ def analytics_demand(days: int = 30, limit: int = 20, db: Session = Depends(get_
     result.sort(key=lambda x: x["search_count"], reverse=True)
     return result[:limit]
 
-
-def require_analytics_token(x_analytics_token: str | None = Header(default=None)):
-    expected = os.environ.get("ANALYTICS_TOKEN")
-    if not expected or x_analytics_token != expected:
-        raise HTTPException(status_code=401, detail="Analytics authorization required")
+@app.get("/analytics/deletions")
+def analytics_deletions(
+    days: int = 30,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_analytics_token),
+):
+    days = max(1, min(days, 365))
+    limit = max(1, min(limit, 1000))
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        db.query(models.ProductDeletionLog)
+        .filter(models.ProductDeletionLog.deleted_at >= since)
+        .order_by(models.ProductDeletionLog.deleted_at.desc(), models.ProductDeletionLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "days": days,
+        "deletions": [
+            {
+                "id": row.id,
+                "product_id": row.product_id,
+                "product_name": row.product_name,
+                "category": row.category,
+                "price_usd": row.price_usd,
+                "deleted_by_admin_id": row.deleted_by_admin_id,
+                "deleted_by_admin_username": row.deleted_by_admin_username,
+                "source": row.source,
+                "batch_id": row.batch_id,
+                "deleted_at": row.deleted_at,
+            }
+            for row in rows
+        ],
+    }
 
 @app.get("/analytics/admins")
 def analytics_admins(days: int = 30, db: Session = Depends(get_db), _auth=Depends(require_analytics_token)):
