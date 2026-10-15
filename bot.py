@@ -1470,18 +1470,52 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    product_id = context.user_data.pop("editing_product_id", None)
-    field = context.user_data.pop("editing_field", None)
-    value = context.user_data.pop("pending_edit_value", None)
+    product_id = context.user_data.get("editing_product_id")
+    field = context.user_data.get("editing_field")
+    value = context.user_data.get("pending_edit_value")
     if not product_id or not field or value is None:
         await query.message.reply_text("❌ ویرایش منقضی شده است.")
         return ConversationHandler.END
-    await call_api(
-        "PUT",
-        f"/products/{product_id}",
-        data={field: value},
-        headers=product_edit_audit_headers(query.from_user),
-    )
+
+    try:
+        await call_api(
+            "PUT",
+            f"/products/{product_id}",
+            data={field: value},
+            headers=product_edit_audit_headers(query.from_user),
+        )
+    except Exception as exc:
+        logger.exception(
+            "Could not save product edit product_id=%s field=%s",
+            product_id,
+            field,
+        )
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 401:
+            error_text = (
+                "❌ ذخیره انجام نشد؛ مجوز API رد شد. مقدار ADMIN_API_TOKEN در بات ادمین "
+                "و سرویس API باید یکسان باشد. اطلاعات ویرایش حفظ شده؛ پس از رفع مشکل "
+                "دوباره «تأیید ذخیره» را بزنید."
+            )
+        elif status_code == 404:
+            error_text = "❌ محصول در API پیدا نشد. اطلاعات ویرایش حفظ شده است."
+        else:
+            error_text = (
+                "❌ ذخیرهٔ تغییر انجام نشد. اطلاعات ویرایش پاک نشده؛ دوباره «تأیید ذخیره» "
+                "را بزنید یا «لغو» کنید. جزئیات خطا در لاگ سرویس بات ثبت شد."
+            )
+        await query.message.reply_text(
+            error_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تلاش دوباره", callback_data="confirm_edit")],
+                [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+            ]),
+        )
+        return EDIT_VALUE
+
+    context.user_data.pop("editing_product_id", None)
+    context.user_data.pop("editing_field", None)
+    context.user_data.pop("pending_edit_value", None)
     await query.message.reply_text("✅ تغییر با موفقیت ذخیره شد.", reply_markup=main_menu(query.from_user.id))
     return ConversationHandler.END
 
@@ -2364,7 +2398,10 @@ async def _goto_confirm(
 async def add_confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    product = context.user_data["product"]
+    product = context.user_data.get("product")
+    if not product:
+        await query.message.reply_text("❌ اطلاعات محصول منقضی شده است؛ افزودن را دوباره شروع کنید.")
+        return ConversationHandler.END
 
     # Build API payload
     payload = {
@@ -2372,7 +2409,7 @@ async def add_confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "price_usd": product["price_usd"],
         "owner_admin_id": update.effective_user.id,
         "created_by_admin_id": update.effective_user.id,
-                    "created_by_admin_id": update.effective_user.id,
+        "created_by_admin_username": update.effective_user.username or update.effective_user.full_name,
     }
     for field in ("size", "weight_grams", "location", "category", "description",
                   "original_photo_path"):
@@ -2381,20 +2418,44 @@ async def add_confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         result = await call_api("POST", "/products", data=payload)
-        fire_event("product_created", user_id=update.effective_user.id, product_id=result.get("id"), category=payload.get("category"), metadata={"source": "manual_add", "admin_username": update.effective_user.username or update.effective_user.full_name})
-        text = (
-            f"✅ محصول با موفقیت ثبت شد!\n\n"
-            f"ID: {result['id']}\n"
-            f"نام: {result['name']}\n"
-            f"قیمت: ${result['price_usd']}\n"
-            f"\nمشاهده: /list"
-        )
-        await query.message.reply_text(text)
     except Exception as exc:
-        logger.error("Error saving product: %s", exc)
-        await query.message.reply_text("❌ خطا در ثبت محصول. دوباره تلاش کنید.")
+        logger.exception("Error saving product")
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 401:
+            error_text = (
+                "❌ API اجازهٔ ثبت نداد. مقدار ADMIN_API_TOKEN در بات ادمین و سرویس API "
+                "باید یکسان باشد. اطلاعات فرم حفظ شده؛ پس از اصلاح دوباره «تأیید و ثبت» را بزنید."
+            )
+        else:
+            error_text = (
+                "❌ ثبت محصول ناموفق بود؛ اطلاعات واردشده حفظ شده است. اگر خطا از timeout بود، "
+                "اول /list را بررسی کنید تا ثبت تکراری نشود؛ در غیر این صورت دوباره «تأیید و ثبت» را بزنید."
+            )
+        await query.message.reply_text(
+            error_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تلاش دوباره", callback_data="confirm_save")],
+                [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+            ]),
+        )
+        return CONFIRM
 
     context.user_data.clear()
+    fire_event(
+        "product_created",
+        user_id=update.effective_user.id,
+        product_id=result.get("id"),
+        category=payload.get("category"),
+        metadata={"source": "manual_add", "admin_username": update.effective_user.username or update.effective_user.full_name},
+    )
+    text = (
+        f"✅ محصول با موفقیت ثبت شد!\n\n"
+        f"ID: {result['id']}\n"
+        f"نام: {result['name']}\n"
+        f"قیمت: ${result['price_usd']}\n"
+        f"\nمشاهده: /list"
+    )
+    await query.message.reply_text(text)
     return ConversationHandler.END
 
 
@@ -2816,10 +2877,58 @@ async def quick_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ ویرایش شد. برای ویرایش بخش دیگر دکمه ویرایش را بزنید یا ثبت کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ثبت محصول", callback_data="quick_save")],[InlineKeyboardButton("✏️ ویرایش بخش دیگر", callback_data="quick_edit")],[InlineKeyboardButton("❌ لغو", callback_data="cancel")]]))
     return QUICK_CONFIRM
 async def quick_add_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; await q.answer(); p=context.user_data.pop("quick_preview", context.user_data.get("product",{})); payload={k:v for k,v in p.items() if k not in ("photo_paths",) and v not in (None, "")}; payload["owner_admin_id"]=q.from_user.id; payload["created_by_admin_id"]=q.from_user.id; payload["created_by_admin_username"]=q.from_user.username or q.from_user.full_name
-    try: result=await call_api("POST","/products",data=payload); fire_event("product_created", user_id=q.from_user.id, product_id=result.get("id"), category=payload.get("category"), metadata={"source": "quick_add", "admin_username": q.from_user.username or q.from_user.full_name}); await q.message.reply_text(f"✅ محصول ثبت شد. ID: {result['id']}",reply_markup=main_menu(q.from_user.id))
-    except Exception: await q.message.reply_text("❌ ثبت محصول ناموفق بود.",reply_markup=main_menu(q.from_user.id))
-    context.user_data.clear(); return ConversationHandler.END
+    q = update.callback_query
+    await q.answer()
+    product = context.user_data.get("quick_preview") or context.user_data.get("product")
+    if not product:
+        await q.message.reply_text("❌ اطلاعات محصول منقضی شده است؛ افزودن سریع را دوباره شروع کنید.")
+        return ConversationHandler.END
+
+    payload = {
+        key: value
+        for key, value in product.items()
+        if key != "photo_paths" and value not in (None, "")
+    }
+    payload["owner_admin_id"] = q.from_user.id
+    payload["created_by_admin_id"] = q.from_user.id
+    payload["created_by_admin_username"] = q.from_user.username or q.from_user.full_name
+    try:
+        result = await call_api("POST", "/products", data=payload)
+    except Exception as exc:
+        logger.exception("Error saving quick-added product")
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 401:
+            error_text = (
+                "❌ API اجازهٔ ثبت نداد. مقدار ADMIN_API_TOKEN در بات ادمین و سرویس API "
+                "باید یکسان باشد. پیش‌نمایش حفظ شده؛ پس از اصلاح دوباره ثبت کنید."
+            )
+        else:
+            error_text = (
+                "❌ ثبت محصول ناموفق بود؛ پیش‌نمایش حفظ شده است. اگر خطا از timeout بود، "
+                "اول /list را بررسی کنید تا ثبت تکراری نشود؛ در غیر این صورت دوباره ثبت کنید."
+            )
+        await q.message.reply_text(
+            error_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تلاش دوباره", callback_data="quick_save")],
+                [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+            ]),
+        )
+        return QUICK_CONFIRM
+
+    context.user_data.clear()
+    fire_event(
+        "product_created",
+        user_id=q.from_user.id,
+        product_id=result.get("id"),
+        category=payload.get("category"),
+        metadata={"source": "quick_add", "admin_username": q.from_user.username or q.from_user.full_name},
+    )
+    await q.message.reply_text(
+        f"✅ محصول ثبت شد. ID: {result['id']}",
+        reply_markup=main_menu(q.from_user.id),
+    )
+    return ConversationHandler.END
 # ── Main ─────────────────────────────────────────────────────
 def main():
     application = (
